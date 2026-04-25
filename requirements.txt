@@ -9,3 +9,5 @@ mcp
 python-dotenv
 pyyaml
 numpy
+starlette
+sse-starlette
