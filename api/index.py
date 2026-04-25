@@ -1,5 +1,9 @@
 import os
+import sys
 from typing import List, Optional
+
+# Add the parent directory to sys.path to allow imports from core and utils
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
