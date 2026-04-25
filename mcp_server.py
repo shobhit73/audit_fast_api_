@@ -251,126 +251,131 @@ async def handle_call_tool(name: str, arguments: dict | None):
     def decode_file(b64, default_name="file.xlsx"):
         return base64.b64decode(b64) if b64 else b""
 
-    if name == "adp_total_comparison":
-        adp_data = [(decode_file(b64), f"adp_{i}.xlsx") for i, b64 in enumerate(arguments.get("adp_files_base64", []))]
-        uzio_data = (decode_file(arguments.get("uzio_file_base64")), "uzio.xlsx")
-        mappings = json.loads(arguments.get("mappings_json", "[]"))
-        results = run_adp_total_comparison(adp_data, uzio_data, mappings)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+    try:
+        if name == "adp_total_comparison":
+            adp_data = [(decode_file(b64), f"adp_{i}.xlsx") for i, b64 in enumerate(arguments.get("adp_files_base64", []))]
+            uzio_data = (decode_file(arguments.get("uzio_file_base64")), "uzio.xlsx")
+            mappings = json.loads(arguments.get("mappings_json", "[]"))
+            results = run_adp_total_comparison(adp_data, uzio_data, mappings)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "adp_census_audit":
-        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-        adp_content = decode_file(arguments.get("adp_raw_base64"))
-        results = run_adp_census_audit(uzio_content, adp_content)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "adp_census_audit":
+            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+            adp_content = decode_file(arguments.get("adp_raw_base64"))
+            results = run_adp_census_audit(uzio_content, adp_content)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "adp_deduction_audit":
-        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-        adp_content = decode_file(arguments.get("adp_raw_base64"))
-        mapping = json.loads(arguments.get("mapping_json", "{}"))
-        results = run_adp_deduction_audit(uzio_content, adp_content, mapping)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "adp_deduction_audit":
+            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+            adp_content = decode_file(arguments.get("adp_raw_base64"))
+            mapping = json.loads(arguments.get("mapping_json", "{}"))
+            results = run_adp_deduction_audit(uzio_content, adp_content, mapping)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "paycom_deduction_analyzer":
-        sched = decode_file(arguments.get("scheduled_report_base64"))
-        prior = decode_file(arguments.get("prior_payroll_base64"))
-        config = decode_file(arguments.get("config_file_base64")) if "config_file_base64" in arguments else None
-        results = run_paycom_deduction_analysis(sched, prior, config)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "paycom_deduction_analyzer":
+            sched = decode_file(arguments.get("scheduled_report_base64"))
+            prior = decode_file(arguments.get("prior_payroll_base64"))
+            config = decode_file(arguments.get("config_file_base64")) if "config_file_base64" in arguments else None
+            results = run_paycom_deduction_analysis(sched, prior, config)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "paycom_total_comparison":
-        paycom_data = [(decode_file(b64), f"paycom_{i}.xlsx") for i, b64 in enumerate(arguments.get("paycom_files_base64", []))]
-        uzio_data = (decode_file(arguments.get("uzio_file_base64")), "uzio.xlsx")
-        mappings = json.loads(arguments.get("mappings_json", "[]"))
-        results = run_paycom_total_comparison(paycom_data, uzio_data, mappings)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "paycom_total_comparison":
+            paycom_data = [(decode_file(b64), f"paycom_{i}.xlsx") for i, b64 in enumerate(arguments.get("paycom_files_base64", []))]
+            uzio_data = (decode_file(arguments.get("uzio_file_base64")), "uzio.xlsx")
+            mappings = json.loads(arguments.get("mappings_json", "[]"))
+            results = run_paycom_total_comparison(paycom_data, uzio_data, mappings)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "paycom_sql_master":
-        content = decode_file(arguments.get("sql_file_base64"))
-        results = run_paycom_sql_master(content)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "paycom_sql_master":
+            content = decode_file(arguments.get("sql_file_base64"))
+            results = run_paycom_sql_master(content)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "adp_payment_audit":
-        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-        adp_content = decode_file(arguments.get("adp_raw_base64"))
-        results = run_adp_payment_audit(uzio_content, adp_content)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "adp_payment_audit":
+            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+            adp_content = decode_file(arguments.get("adp_raw_base64"))
+            results = run_adp_payment_audit(uzio_content, adp_content)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "adp_withholding_audit":
-        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-        adp_content = decode_file(arguments.get("adp_raw_base64"))
-        results = run_adp_withholding_audit(uzio_content, adp_content)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "adp_withholding_audit":
+            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+            adp_content = decode_file(arguments.get("adp_raw_base64"))
+            results = run_adp_withholding_audit(uzio_content, adp_content)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "adp_census_sanity":
-        content = decode_file(arguments.get("file_base64"))
-        import pandas as pd
-        import io
-        df = pd.read_excel(io.BytesIO(content), dtype=str)
-        results = run_census_sanity_check(df, ADP_FIELD_MAP)
-        # Convert DataFrame to list of dicts for JSON serialization
-        if hasattr(results, "to_dict"): results = results.to_dict(orient="records")
-        elif isinstance(results, dict) and "hard_errors" in results:
-            if hasattr(results["hard_errors"], "to_dict"):
-                results["hard_errors"] = results["hard_errors"].to_dict(orient="records")
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "adp_census_sanity":
+            content = decode_file(arguments.get("file_base64"))
+            import pandas as pd
+            import io
+            df = pd.read_excel(io.BytesIO(content), dtype=str)
+            results = run_census_sanity_check(df, ADP_FIELD_MAP)
+            # Convert DataFrame to list of dicts for JSON serialization
+            if hasattr(results, "to_dict"): results = results.to_dict(orient="records")
+            elif isinstance(results, dict) and "hard_errors" in results:
+                if hasattr(results["hard_errors"], "to_dict"):
+                    results["hard_errors"] = results["hard_errors"].to_dict(orient="records")
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "adp_emergency_audit":
-        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-        adp_content = decode_file(arguments.get("adp_raw_base64"))
-        results = run_adp_emergency_audit(uzio_content, adp_content)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "adp_emergency_audit":
+            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+            adp_content = decode_file(arguments.get("adp_raw_base64"))
+            results = run_adp_emergency_audit(uzio_content, adp_content)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "adp_license_audit":
-        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-        adp_content = decode_file(arguments.get("adp_raw_base64"))
-        results = run_adp_license_audit(uzio_content, adp_content)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "adp_license_audit":
+            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+            adp_content = decode_file(arguments.get("adp_raw_base64"))
+            results = run_adp_license_audit(uzio_content, adp_content)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "adp_timeoff_audit":
-        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-        adp_content = decode_file(arguments.get("adp_raw_base64"))
-        results = run_adp_timeoff_audit(uzio_content, adp_content)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "adp_timeoff_audit":
+            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+            adp_content = decode_file(arguments.get("adp_raw_base64"))
+            results = run_adp_timeoff_audit(uzio_content, adp_content)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "paycom_payment_audit":
-        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-        paycom_content = decode_file(arguments.get("paycom_raw_base64"))
-        results = run_paycom_payment_audit(uzio_content, paycom_content)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "paycom_payment_audit":
+            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+            paycom_content = decode_file(arguments.get("paycom_raw_base64"))
+            results = run_paycom_payment_audit(uzio_content, paycom_content)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "paycom_emergency_audit":
-        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-        paycom_content = decode_file(arguments.get("paycom_raw_base64"))
-        results = run_paycom_emergency_audit(uzio_content, paycom_content)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "paycom_emergency_audit":
+            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+            paycom_content = decode_file(arguments.get("paycom_raw_base64"))
+            results = run_paycom_emergency_audit(uzio_content, paycom_content)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "paycom_timeoff_audit":
-        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-        paycom_content = decode_file(arguments.get("paycom_raw_base64"))
-        results = run_paycom_timeoff_audit(uzio_content, paycom_content)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "paycom_timeoff_audit":
+            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+            paycom_content = decode_file(arguments.get("paycom_raw_base64"))
+            results = run_paycom_timeoff_audit(uzio_content, paycom_content)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "paycom_withholding_audit":
-        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-        paycom_content = decode_file(arguments.get("paycom_raw_base64"))
-        mapping = decode_file(arguments.get("mapping_file_base64")) if "mapping_file_base64" in arguments else None
-        results = run_paycom_withholding_audit(uzio_content, paycom_content, mapping)
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "paycom_withholding_audit":
+            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+            paycom_content = decode_file(arguments.get("paycom_raw_base64"))
+            mapping = decode_file(arguments.get("mapping_file_base64")) if "mapping_file_base64" in arguments else None
+            results = run_paycom_withholding_audit(uzio_content, paycom_content, mapping)
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    elif name == "paycom_census_sanity":
-        content = decode_file(arguments.get("file_base64"))
-        import pandas as pd
-        import io
-        df = pd.read_excel(io.BytesIO(content), dtype=str)
-        results = run_census_sanity_check(df, PAYCOM_FIELD_MAP)
-        if hasattr(results, "to_dict"): results = results.to_dict(orient="records")
-        elif isinstance(results, dict) and "hard_errors" in results:
-            if hasattr(results["hard_errors"], "to_dict"):
-                results["hard_errors"] = results["hard_errors"].to_dict(orient="records")
-        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+        elif name == "paycom_census_sanity":
+            content = decode_file(arguments.get("file_base64"))
+            import pandas as pd
+            import io
+            df = pd.read_excel(io.BytesIO(content), dtype=str)
+            results = run_census_sanity_check(df, PAYCOM_FIELD_MAP)
+            if hasattr(results, "to_dict"): results = results.to_dict(orient="records")
+            elif isinstance(results, dict) and "hard_errors" in results:
+                if hasattr(results["hard_errors"], "to_dict"):
+                    results["hard_errors"] = results["hard_errors"].to_dict(orient="records")
+            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
-    raise ValueError(f"Unknown tool: {name}")
+        raise ValueError(f"Unknown tool: {name}")
+    except Exception as e:
+        import traceback
+        error_msg = f"Error executing tool '{name}': {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        return [types.TextContent(type="text", text=error_msg)]
 
 # ── SSE transport ──
 sse = SseServerTransport("/messages")

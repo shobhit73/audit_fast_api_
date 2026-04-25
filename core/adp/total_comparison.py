@@ -3,16 +3,16 @@ import io
 from utils.audit_utils import clean_money_val, norm_colname, normalize_id, format_pay_date, find_header_and_data
 
 def calculate_totals(df, header_top, column_names):
-    """Sum up values for columns that match any of the provided names."""
+    """Sum up values for columns that match any of the provided names using vectorized operations."""
     found_cols = []
-    emp_tots = {}
-    emp_row_counts = {}
     
+    # 1. Identify key columns
     id_col = next((c for c in df.columns if any(x in str(c).lower() for x in ["associate id", "employee id", "file #"])), None)
     date_col = next((c for c in df.columns if any(x == str(c).lower().strip() for x in ["pay date", "check date"])), None)
     if date_col is None:
         date_col = next((c for c in df.columns if any(x in str(c).lower() for x in ["pay date", "period end", "check date"])), None)
     
+    # 2. Filter data (Remove grand totals and NAs)
     if id_col:
         df_clean = df[df[id_col].notna()].copy()
         df_clean[id_col] = df_clean[id_col].apply(normalize_id)
@@ -24,6 +24,7 @@ def calculate_totals(df, header_top, column_names):
         mask = df.iloc[:, 0].astype(str).str.lower().str.contains("total|grand", na=False)
         df_clean = df[~mask].copy()
     
+    # 3. Identify columns to sum
     norm_cols_main = {norm_colname(c).lower(): i for i, c in enumerate(df.columns)}
     norm_cols_top = {}
     if header_top:
@@ -52,19 +53,30 @@ def calculate_totals(df, header_top, column_names):
                     if not any(x in main_h for x in ['wages', 'hours', 'rate', 'basis', 'taxable']):
                         cols_to_sum.append(df.columns[k])
                         found_cols.append(f"{df.columns[k]}")
-                        
-    for _, row in df_clean.iterrows():
-        eid = row[id_col] if id_col else "Unknown"
-        pay_date = format_pay_date(row[date_col]) if date_col else "Unknown"
-        row_tot = sum(clean_money_val(row[c]) for c in set(cols_to_sum))
-        key = (eid, pay_date)
-        if key not in emp_tots:
-            emp_tots[key] = 0.0
-            emp_row_counts[key] = 0
-        emp_tots[key] += row_tot
-        emp_row_counts[key] += 1
+    
+    if not cols_to_sum:
+        return 0.0, [], {}, {}
+
+    # 4. Vectorized calculation
+    unique_cols = list(set(cols_to_sum))
+    for c in unique_cols:
+        df_clean[c] = df_clean[c].apply(clean_money_val)
+    
+    if id_col and date_col:
+        df_clean[date_col] = df_clean[date_col].apply(format_pay_date)
+        # Group by ID and Date, then sum the numeric columns
+        grouped = df_clean.groupby([id_col, date_col])
+        emp_tots_series = grouped[unique_cols].sum().sum(axis=1)
+        emp_counts_series = grouped.size()
+        
+        emp_tots = emp_tots_series.to_dict()
+        emp_row_counts = emp_counts_series.to_dict()
+    else:
+        # Fallback if ID/Date missing
+        total_sum = df_clean[unique_cols].sum().sum()
+        return float(total_sum), found_cols, {}, {}
             
-    return sum(emp_tots.values()), found_cols, emp_tots, emp_row_counts
+    return float(emp_tots_series.sum()), found_cols, emp_tots, emp_row_counts
 
 def run_adp_total_comparison(adp_files_data, uzio_file_data, mappings):
     """
