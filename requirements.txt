@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pandas
+openpyxl
+xlsxwriter
+python-multipart
+httpx
+mcp
+python-dotenv
+pyyaml
