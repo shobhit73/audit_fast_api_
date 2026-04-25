@@ -14,9 +14,17 @@ from core.adp.withholding_audit import run_adp_withholding_audit
 
 from core.paycom.deduction_analyzer import run_paycom_deduction_analysis
 from core.paycom.total_comparison import run_paycom_total_comparison
-from core.paycom.census_audit import run_paycom_census_audit
+from core.paycom.census_audit import run_paycom_census_audit, PAYCOM_FIELD_MAP
 from core.paycom.withholding_audit import run_paycom_withholding_audit
 from core.paycom.sql_master import run_paycom_sql_master
+
+from core.adp.census_audit import ADP_FIELD_MAP
+from core.census.sanity_check import run_census_sanity_check
+from core.misc_audits import (
+    run_adp_emergency_audit, run_paycom_emergency_audit, 
+    run_adp_license_audit, run_adp_timeoff_audit, 
+    run_paycom_timeoff_audit, run_paycom_payment_audit
+)
 
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
@@ -65,6 +73,77 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["uzio_raw_base64", "adp_raw_base64", "mapping_json"],
             },
         ),
+        types.Tool(
+            name="adp_payment_audit",
+            description="Audits payment methods and amounts between Uzio and ADP.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_raw_base64": {"type": "string"},
+                    "adp_raw_base64": {"type": "string"}
+                },
+                "required": ["uzio_raw_base64", "adp_raw_base64"],
+            },
+        ),
+        types.Tool(
+            name="adp_withholding_audit",
+            description="Audits tax withholding settings between Uzio and ADP.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_raw_base64": {"type": "string"},
+                    "adp_raw_base64": {"type": "string"}
+                },
+                "required": ["uzio_raw_base64", "adp_raw_base64"],
+            },
+        ),
+        types.Tool(
+            name="adp_census_sanity",
+            description="Performs a sanity check on ADP census files.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_base64": {"type": "string"}
+                },
+                "required": ["file_base64"],
+            },
+        ),
+        types.Tool(
+            name="adp_emergency_audit",
+            description="Audits emergency contact information between Uzio and ADP.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_raw_base64": {"type": "string"},
+                    "adp_raw_base64": {"type": "string"}
+                },
+                "required": ["uzio_raw_base64", "adp_raw_base64"],
+            },
+        ),
+        types.Tool(
+            name="adp_license_audit",
+            description="Audits professional licenses between Uzio and ADP.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_raw_base64": {"type": "string"},
+                    "adp_raw_base64": {"type": "string"}
+                },
+                "required": ["uzio_raw_base64", "adp_raw_base64"],
+            },
+        ),
+        types.Tool(
+            name="adp_timeoff_audit",
+            description="Audits time-off balances between Uzio and ADP.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_raw_base64": {"type": "string"},
+                    "adp_raw_base64": {"type": "string"}
+                },
+                "required": ["uzio_raw_base64", "adp_raw_base64"],
+            },
+        ),
 
         # --- PAYCOM TOOLS ---
         types.Tool(
@@ -102,6 +181,66 @@ async def handle_list_tools() -> list[types.Tool]:
                     "sql_file_base64": {"type": "string"}
                 },
                 "required": ["sql_file_base64"],
+            },
+        ),
+        types.Tool(
+            name="paycom_payment_audit",
+            description="Audits payment methods and amounts between Uzio and Paycom.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_raw_base64": {"type": "string"},
+                    "paycom_raw_base64": {"type": "string"}
+                },
+                "required": ["uzio_raw_base64", "paycom_raw_base64"],
+            },
+        ),
+        types.Tool(
+            name="paycom_emergency_audit",
+            description="Audits emergency contact information between Uzio and Paycom.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_raw_base64": {"type": "string"},
+                    "paycom_raw_base64": {"type": "string"}
+                },
+                "required": ["uzio_raw_base64", "paycom_raw_base64"],
+            },
+        ),
+        types.Tool(
+            name="paycom_timeoff_audit",
+            description="Audits time-off balances between Uzio and Paycom.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_raw_base64": {"type": "string"},
+                    "paycom_raw_base64": {"type": "string"}
+                },
+                "required": ["uzio_raw_base64", "paycom_raw_base64"],
+            },
+        ),
+        types.Tool(
+            name="paycom_withholding_audit",
+            description="Audits tax withholding settings between Uzio and Paycom.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_raw_base64": {"type": "string"},
+                    "paycom_raw_base64": {"type": "string"},
+                    "mapping_file_base64": {"type": "string"}
+                },
+                "required": ["uzio_raw_base64", "paycom_raw_base64"],
+            },
+        ),
+        types.Tool(
+            name="paycom_census_sanity",
+            description="Performs a sanity check on Paycom census files.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_base64": {"type": "string"}
+                },
+                "required": ["file_base64"],
             },
         )
     ]
@@ -149,6 +288,86 @@ async def handle_call_tool(name: str, arguments: dict | None):
     elif name == "paycom_sql_master":
         content = decode_file(arguments.get("sql_file_base64"))
         results = run_paycom_sql_master(content)
+        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+
+    elif name == "adp_payment_audit":
+        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+        adp_content = decode_file(arguments.get("adp_raw_base64"))
+        results = run_adp_payment_audit(uzio_content, adp_content)
+        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+
+    elif name == "adp_withholding_audit":
+        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+        adp_content = decode_file(arguments.get("adp_raw_base64"))
+        results = run_adp_withholding_audit(uzio_content, adp_content)
+        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+
+    elif name == "adp_census_sanity":
+        content = decode_file(arguments.get("file_base64"))
+        import pandas as pd
+        import io
+        df = pd.read_excel(io.BytesIO(content), dtype=str)
+        results = run_census_sanity_check(df, ADP_FIELD_MAP)
+        # Convert DataFrame to list of dicts for JSON serialization
+        if hasattr(results, "to_dict"): results = results.to_dict(orient="records")
+        elif isinstance(results, dict) and "hard_errors" in results:
+            if hasattr(results["hard_errors"], "to_dict"):
+                results["hard_errors"] = results["hard_errors"].to_dict(orient="records")
+        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+
+    elif name == "adp_emergency_audit":
+        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+        adp_content = decode_file(arguments.get("adp_raw_base64"))
+        results = run_adp_emergency_audit(uzio_content, adp_content)
+        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+
+    elif name == "adp_license_audit":
+        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+        adp_content = decode_file(arguments.get("adp_raw_base64"))
+        results = run_adp_license_audit(uzio_content, adp_content)
+        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+
+    elif name == "adp_timeoff_audit":
+        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+        adp_content = decode_file(arguments.get("adp_raw_base64"))
+        results = run_adp_timeoff_audit(uzio_content, adp_content)
+        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+
+    elif name == "paycom_payment_audit":
+        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+        paycom_content = decode_file(arguments.get("paycom_raw_base64"))
+        results = run_paycom_payment_audit(uzio_content, paycom_content)
+        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+
+    elif name == "paycom_emergency_audit":
+        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+        paycom_content = decode_file(arguments.get("paycom_raw_base64"))
+        results = run_paycom_emergency_audit(uzio_content, paycom_content)
+        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+
+    elif name == "paycom_timeoff_audit":
+        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+        paycom_content = decode_file(arguments.get("paycom_raw_base64"))
+        results = run_paycom_timeoff_audit(uzio_content, paycom_content)
+        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+
+    elif name == "paycom_withholding_audit":
+        uzio_content = decode_file(arguments.get("uzio_raw_base64"))
+        paycom_content = decode_file(arguments.get("paycom_raw_base64"))
+        mapping = decode_file(arguments.get("mapping_file_base64")) if "mapping_file_base64" in arguments else None
+        results = run_paycom_withholding_audit(uzio_content, paycom_content, mapping)
+        return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+
+    elif name == "paycom_census_sanity":
+        content = decode_file(arguments.get("file_base64"))
+        import pandas as pd
+        import io
+        df = pd.read_excel(io.BytesIO(content), dtype=str)
+        results = run_census_sanity_check(df, PAYCOM_FIELD_MAP)
+        if hasattr(results, "to_dict"): results = results.to_dict(orient="records")
+        elif isinstance(results, dict) and "hard_errors" in results:
+            if hasattr(results["hard_errors"], "to_dict"):
+                results["hard_errors"] = results["hard_errors"].to_dict(orient="records")
         return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
 
     raise ValueError(f"Unknown tool: {name}")
