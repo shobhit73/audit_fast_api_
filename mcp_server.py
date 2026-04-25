@@ -154,7 +154,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
     raise ValueError(f"Unknown tool: {name}")
 
 # ── SSE transport ──
-sse = SseServerTransport("/mcp/messages")
+sse = SseServerTransport("/messages")
 
 async def handle_sse(request):
     async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
