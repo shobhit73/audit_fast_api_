@@ -1,21 +1,25 @@
 import os
 import sys
 from typing import List, Optional
+import traceback
+import io
+import pandas as pd
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
 
-# Add the project root to sys.path so we can import from core and utils
-# This is crucial for Vercel where the current working directory is /api
-root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if root not in sys.path:
-    sys.path.append(root)
+# Define app at top level for Vercel detection
+app = FastAPI(title="Audit Tool API")
 
-startup_error = None
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Startup Logic Wrapper
 try:
-    from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
-    from fastapi.middleware.cors import CORSMiddleware
-    import pandas as pd
-    import io
-    import traceback
-
     # ADP Imports
     from core.adp.total_comparison import run_adp_total_comparison
     from core.adp.census_audit import run_adp_census_audit
@@ -33,21 +37,12 @@ try:
 
     from utils.audit_utils import norm_colname
 
-    app = FastAPI(title="Audit Tool API")
-
+    # MCP Server Integration
     try:
         from mcp_server import mcp_app
         app.mount("/mcp", mcp_app)
     except Exception as e:
         print(f"Warning: Failed to mount MCP app. Error: {e}")
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
 
     def load_mapping_from_file(content, filename, cat_name, adp_col, uzio_col):
         try:
@@ -77,16 +72,8 @@ try:
         ]}
 
     # --- ADP ENDPOINTS ---
-
     @app.post("/audit/adp/total-comparison")
-    async def adp_total_comparison(
-        adp_files: List[UploadFile] = File(...),
-        uzio_file: UploadFile = File(...),
-        earn_mapping: UploadFile = File(...),
-        ded_mapping: UploadFile = File(...),
-        cont_mapping: UploadFile = File(...),
-        tax_mapping: UploadFile = File(...)
-    ):
+    async def adp_total_comparison(adp_files: List[UploadFile] = File(...), uzio_file: UploadFile = File(...), earn_mapping: UploadFile = File(...), ded_mapping: UploadFile = File(...), cont_mapping: UploadFile = File(...), tax_mapping: UploadFile = File(...)):
         try:
             adp_data = [(await f.read(), f.filename) for f in adp_files]
             uzio_data = (await uzio_file.read(), uzio_file.filename)
@@ -122,7 +109,6 @@ try:
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
     # --- PAYCOM ENDPOINTS ---
-
     @app.post("/audit/paycom/deduction-analyzer")
     async def paycom_deduction_analyzer(scheduled_report: UploadFile = File(...), prior_payroll: UploadFile = File(...), config_file: Optional[UploadFile] = File(None)):
         try:
@@ -135,7 +121,7 @@ try:
         try:
             paycom_data = [(await f.read(), f.filename) for f in paycom_files]
             uzio_data = (await uzio_file.read(), uzio_file.filename)
-            mappings = [] # Mapping logic same as ADP
+            mappings = [] 
             return run_paycom_total_comparison(paycom_data, uzio_data, mappings)
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
@@ -148,8 +134,7 @@ try:
             from core.adp.census_audit import ADP_FIELD_MAP
             resolved_map = {k: v for k, v in ADP_FIELD_MAP.items()} 
             df = pd.read_excel(io.BytesIO(content), dtype=str)
-            results = run_census_sanity_check(df, resolved_map)
-            return results
+            return run_census_sanity_check(df, resolved_map)
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/audit/paycom/census-sanity")
@@ -159,8 +144,7 @@ try:
             from core.paycom.census_audit import PAYCOM_FIELD_MAP
             resolved_map = {k: v for k, v in PAYCOM_FIELD_MAP.items()}
             df = pd.read_excel(io.BytesIO(content), dtype=str)
-            results = run_census_sanity_check(df, resolved_map)
-            return results
+            return run_census_sanity_check(df, resolved_map)
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
     from core.misc_audits import run_adp_emergency_audit, run_paycom_emergency_audit, run_adp_license_audit, run_adp_timeoff_audit, run_paycom_timeoff_audit, run_paycom_payment_audit
@@ -208,25 +192,10 @@ try:
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 except Exception as e:
-    from fastapi import FastAPI
-    import traceback
     startup_error = f"{str(e)}\n{traceback.format_exc()}"
-    app = FastAPI(title="Audit Tool API (Startup Error)")
-
     @app.get("/")
-    async def root():
-        return {
-            "status": "error",
-            "message": "Startup failed",
-            "details": startup_error,
-            "sys_path": sys.path,
-            "cwd": os.getcwd()
-        }
-
+    async def root_error():
+        return {"status": "error", "message": "Startup failed", "details": startup_error}
     @app.get("/{path:path}")
-    async def catch_all(path: str):
-        return {
-            "status": "error",
-            "message": f"Startup failed, cannot handle path: {path}",
-            "details": startup_error
-        }
+    async def catch_all_error(path: str):
+        return {"status": "error", "message": f"Startup failed, cannot handle path: {path}", "details": startup_error}
