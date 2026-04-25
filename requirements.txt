@@ -8,3 +8,4 @@ httpx
 mcp
 python-dotenv
 pyyaml
+numpy
