@@ -54,7 +54,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
 
 
 # ── SSE transport (for remote MCP clients like Claude Desktop) ──
-sse = SseServerTransport("/mcp/messages")
+sse = SseServerTransport("/messages")
 
 async def handle_sse(request):
     async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
