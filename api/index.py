@@ -3,28 +3,37 @@ import sys
 from typing import List, Optional
 
 # Add the parent directory to sys.path to allow imports from core and utils
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
-from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
-import io
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if root not in sys.path:
+    sys.path.append(root)
 
-# ADP Imports
-from core.adp.total_comparison import run_adp_total_comparison
-from core.adp.census_audit import run_adp_census_audit
-from core.adp.deduction_audit import run_adp_deduction_audit
-from core.adp.payment_audit import run_adp_payment_audit
-from core.adp.withholding_audit import run_adp_withholding_audit
-from core.adp.misc_audits import run_adp_emergency_audit, run_adp_license_audit, run_adp_timeoff_audit
+startup_error = None
+try:
+    from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
+    from fastapi.middleware.cors import CORSMiddleware
+    import pandas as pd
+    import io
 
-# Paycom Imports
-from core.paycom.deduction_analyzer import run_paycom_deduction_analysis
-from core.paycom.total_comparison import run_paycom_total_comparison
-from core.paycom.census_audit import run_paycom_census_audit
+    # ADP Imports
+    from core.adp.total_comparison import run_adp_total_comparison
+    from core.adp.census_audit import run_adp_census_audit
+    from core.adp.deduction_audit import run_adp_deduction_audit
+    from core.adp.payment_audit import run_adp_payment_audit
+    from core.adp.withholding_audit import run_adp_withholding_audit
+    from core.adp.misc_audits import run_adp_emergency_audit, run_adp_license_audit, run_adp_timeoff_audit
 
-from utils.audit_utils import norm_colname
+    # Paycom Imports
+    from core.paycom.deduction_analyzer import run_paycom_deduction_analysis
+    from core.paycom.total_comparison import run_paycom_total_comparison
+    from core.paycom.census_audit import run_paycom_census_audit
 
-app = FastAPI(title="Audit Tool API")
+    from utils.audit_utils import norm_colname
+
+    app = FastAPI(title="Audit Tool API")
+except Exception as e:
+    import traceback
+    startup_error = f"{str(e)}\n{traceback.format_exc()}"
+    app = FastAPI(title="Audit Tool API (Startup Error)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,6 +65,8 @@ def load_mapping_from_file(content, filename, cat_name, adp_col, uzio_col):
 
 @app.get("/")
 async def root():
+    if startup_error:
+        return {"status": "error", "message": "Startup failed", "details": startup_error, "sys_path": sys.path}
     return {"message": "Audit Tool API is running", "available_endpoints": [
         "/audit/adp/total-comparison", "/audit/adp/census", "/audit/adp/deduction", "/audit/adp/payment", "/audit/adp/withholding",
         "/audit/paycom/total-comparison", "/audit/paycom/census", "/audit/paycom/deduction-analyzer"
