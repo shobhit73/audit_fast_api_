@@ -35,6 +35,12 @@ try:
 
     app = FastAPI(title="Audit Tool API")
 
+    try:
+        from mcp_server import mcp_app
+        app.mount("/mcp", mcp_app)
+    except Exception as e:
+        print(f"Warning: Failed to mount MCP app. Error: {e}")
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
