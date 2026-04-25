@@ -160,3 +160,29 @@ def read_uzio_raw_file(content):
 def is_hourly_only_job_title(jt_val: str) -> bool:
     jt = jt_val.strip().lower()
     return jt in HOURLY_ONLY_JOB_TITLES or jt.endswith("driver")
+
+def get_identity_match_map(df_uzio, df_vendor, uzio_id_col, vendor_id_col, uzio_ssn_col, vendor_ssn_col):
+    """Maps Uzio employee IDs to vendor IDs via SSN matching."""
+    uz_ssn_map = {norm_ssn_canonical(row[uzio_ssn_col]): str(row[uzio_id_col]).strip()
+                  for _, row in df_uzio.iterrows() if norm_ssn_canonical(row.get(uzio_ssn_col, ""))}
+    result = {}
+    for _, row in df_vendor.iterrows():
+        ssn = norm_ssn_canonical(row.get(vendor_ssn_col, ""))
+        vid = str(row[vendor_id_col]).strip()
+        if ssn and ssn in uz_ssn_map:
+            result[uz_ssn_map[ssn]] = vid
+    return result
+
+def norm_id(x):
+    if pd.isna(x): return ""
+    s = str(x).strip()
+    if s.endswith(".0"): s = s[:-2]
+    return s.lstrip("0")
+
+def normalize_space_and_case(x):
+    if not x: return ""
+    return re.sub(r"\s+", " ", str(x).strip()).lower()
+
+def as_float_or_none(x):
+    try: return float(str(x).replace(",", "").replace("$", "").strip())
+    except: return None

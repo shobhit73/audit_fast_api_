@@ -7,7 +7,6 @@ import mcp.types as types
 from core.adp.total_comparison import run_adp_total_comparison
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
-import uvicorn
 
 server = Server("audit-tool-server")
 
@@ -55,7 +54,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
 
 
 # ── SSE transport (for remote MCP clients like Claude Desktop) ──
-sse = SseServerTransport("/messages")
+sse = SseServerTransport("/mcp/messages")
 
 async def handle_sse(request):
     async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
