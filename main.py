@@ -125,16 +125,59 @@ try:
             return run_paycom_total_comparison(paycom_data, uzio_data, mappings)
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
-    from core.census.sanity_check import run_census_sanity_check
+    from core.census.sanity_check import run_census_sanity_check, generate_corrected_census_xlsx
+    from fastapi.responses import StreamingResponse
 
     @app.post("/audit/adp/census-sanity")
-    async def adp_census_sanity(file: UploadFile = File(...)):
+    async def adp_census_sanity(
+        file: UploadFile = File(...),
+        # Auto-correction toggles (mirror of Streamlit ADP Sanity tool — all default OFF)
+        fix_flsa: bool = Form(False),
+        fix_emails: bool = Form(False),
+        fix_job_title: bool = Form(False),
+        fix_driver_smart: bool = Form(False),
+        fix_license: bool = Form(False),
+        fix_status: bool = Form(False),
+        fix_type: bool = Form(False),
+        fix_dol_status: bool = Form(False),
+        fix_leave_to_active: bool = Form(False),
+        fix_blank_jt_to_driver: bool = Form(False),
+        fix_std_hours: bool = Form(False),
+        rename_std_hours: bool = Form(False),
+        fix_zip: bool = Form(False),
+        rename_zip_col: bool = Form(False),
+        replace_gender_col: bool = Form(False),
+        sort_by_manager: bool = Form(False),
+    ):
         try:
             content = await file.read()
             from core.adp.census_audit import ADP_FIELD_MAP
-            resolved_map = {k: v for k, v in ADP_FIELD_MAP.items()} 
-            df = pd.read_excel(io.BytesIO(content), dtype=str)
-            return run_census_sanity_check(df, resolved_map)
+            fix_options = {
+                'fix_flsa': fix_flsa, 'fix_emails': fix_emails, 'fix_job_title': fix_job_title,
+                'fix_driver_smart': fix_driver_smart, 'fix_license': fix_license,
+                'fix_status': fix_status, 'fix_inactive': fix_status, 'fix_type': fix_type,
+                'fix_dol_status': fix_dol_status, 'fix_leave_to_active': fix_leave_to_active,
+                'fix_blank_jt_to_driver': fix_blank_jt_to_driver,
+                'fix_std_hours': fix_std_hours, 'rename_std_hours': rename_std_hours,
+                'fix_zip': fix_zip, 'rename_zip_col': rename_zip_col,
+                'replace_gender_col': replace_gender_col,
+            }
+            xlsx_bytes, summary = generate_corrected_census_xlsx(
+                content, ADP_FIELD_MAP, fix_options=fix_options,
+                filename=file.filename or "upload.xlsx",
+                sort_by_manager=sort_by_manager,
+            )
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            headers = {
+                "Content-Disposition": f'attachment; filename="ADP_Cleaned_{stamp}.xlsx"',
+                "X-Sanity-Summary": f'rows={summary["rows_total"]}; warnings={summary["rows_with_warnings"]}; changes={summary["changes_logged"]}',
+            }
+            return StreamingResponse(
+                io.BytesIO(xlsx_bytes),
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers=headers,
+            )
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/audit/paycom/census-sanity")

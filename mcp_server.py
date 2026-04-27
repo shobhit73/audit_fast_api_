@@ -19,7 +19,7 @@ from core.paycom.withholding_audit import run_paycom_withholding_audit
 from core.paycom.sql_master import run_paycom_sql_master
 
 from core.adp.census_audit import ADP_FIELD_MAP
-from core.census.sanity_check import run_census_sanity_check
+from core.census.sanity_check import run_census_sanity_check, generate_corrected_census_xlsx
 from core.misc_audits import (
     run_adp_emergency_audit, run_paycom_emergency_audit, 
     run_adp_license_audit, run_adp_timeoff_audit, 
@@ -99,11 +99,33 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="adp_census_sanity",
-            description="Performs a sanity check on ADP census files.",
+            description=(
+                "Applies opt-in auto-corrections to an ADP Census export and returns a base64 "
+                "Excel workbook with two sheets: 'Corrected Census' (cleaned data + a "
+                "CRITICAL_WARNINGS column) and 'Change Log' (per-row audit trail). All toggles "
+                "default OFF — pass true on the ones you want applied."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "file_base64": {"type": "string"}
+                    "file_base64": {"type": "string", "description": "Base64-encoded ADP Census export (.xlsx or .csv)"},
+                    "filename": {"type": "string", "description": "Original filename (used to detect .csv vs .xlsx). Defaults to upload.xlsx."},
+                    "fix_flsa": {"type": "boolean", "description": "Enforce FLSA/Pay Type alignment — fill blank FLSA from Hourly/Salaried."},
+                    "fix_emails": {"type": "boolean", "description": "Use Personal Email as fallback when Work Email is blank."},
+                    "fix_job_title": {"type": "boolean", "description": "Auto-fill blank Job Titles using Department Description."},
+                    "fix_driver_smart": {"type": "boolean", "description": "Smart Driver Correction: if Dept/Job indicates Driver, fill Job/FLSA/Pay Type."},
+                    "fix_license": {"type": "boolean", "description": "Strict license validation — clear license dates if number is missing."},
+                    "fix_status": {"type": "boolean", "description": "Auto-map Employment Status (e.g. Inactive -> Terminated)."},
+                    "fix_type": {"type": "boolean", "description": "Auto-map Worker Category (e.g. Intern -> Part Time)."},
+                    "fix_dol_status": {"type": "boolean", "description": "Auto-fill blank DOL_Status to 'Full Time' for active employees."},
+                    "fix_leave_to_active": {"type": "boolean", "description": "Reclassify Position Status 'Leave' to 'Active' when Termination Date is blank."},
+                    "fix_blank_jt_to_driver": {"type": "boolean", "description": "Auto-fill blank Job Title to 'Driver' for Non-Exempt Hourly employees."},
+                    "fix_std_hours": {"type": "boolean", "description": "Auto-fill blank Standard Hours to '0'."},
+                    "rename_std_hours": {"type": "boolean", "description": "Rename 'Standard Hours' header to 'Working hours per Week'."},
+                    "fix_zip": {"type": "boolean", "description": "Auto-fix Zip Code (pad 4-digits and trim to 5-digits)."},
+                    "rename_zip_col": {"type": "boolean", "description": "Rename 'Primary Address: Zip / Postal Code' to 'Primary Address: Zip Code'."},
+                    "replace_gender_col": {"type": "boolean", "description": "Drop existing 'Gender / Sex (Self-ID)' column and rename 'Sex' to 'Gender / Sex (Self-ID)'."},
+                    "sort_by_manager": {"type": "boolean", "description": "Cluster managers and their reportees at the top of the output."},
                 },
                 "required": ["file_base64"],
             },
@@ -305,16 +327,30 @@ async def handle_call_tool(name: str, arguments: dict | None):
 
         elif name == "adp_census_sanity":
             content = decode_file(arguments.get("file_base64"))
-            import pandas as pd
-            import io
-            df = pd.read_excel(io.BytesIO(content), dtype=str)
-            results = run_census_sanity_check(df, ADP_FIELD_MAP)
-            # Convert DataFrame to list of dicts for JSON serialization
-            if hasattr(results, "to_dict"): results = results.to_dict(orient="records")
-            elif isinstance(results, dict) and "hard_errors" in results:
-                if hasattr(results["hard_errors"], "to_dict"):
-                    results["hard_errors"] = results["hard_errors"].to_dict(orient="records")
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            filename = arguments.get("filename") or "upload.xlsx"
+            toggle_keys = [
+                "fix_flsa", "fix_emails", "fix_job_title", "fix_driver_smart", "fix_license",
+                "fix_status", "fix_type", "fix_dol_status", "fix_leave_to_active",
+                "fix_blank_jt_to_driver", "fix_std_hours", "rename_std_hours",
+                "fix_zip", "rename_zip_col", "replace_gender_col",
+            ]
+            fix_options = {k: bool(arguments.get(k, False)) for k in toggle_keys}
+            fix_options["fix_inactive"] = fix_options["fix_status"]
+            sort_by_manager = bool(arguments.get("sort_by_manager", False))
+            xlsx_bytes, summary = generate_corrected_census_xlsx(
+                content, ADP_FIELD_MAP, fix_options=fix_options,
+                filename=filename, sort_by_manager=sort_by_manager,
+            )
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            payload = {
+                "filename": f"ADP_Cleaned_{stamp}.xlsx",
+                "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "file_base64": base64.b64encode(xlsx_bytes).decode("ascii"),
+                "summary": summary,
+                "applied_toggles": {k: v for k, v in fix_options.items() if v},
+            }
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2))]
 
         elif name == "adp_emergency_audit":
             uzio_content = decode_file(arguments.get("uzio_raw_base64"))
