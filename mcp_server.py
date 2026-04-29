@@ -164,6 +164,29 @@ def load_mappings_from_paths(paths):
             print(f"Error loading mapping {p}: {e}")
     return mappings
 
+def copy_file_to_inbox(source_path):
+    """Safely copies a file from anywhere on the system to the Audit Files inbox."""
+    import shutil
+    source_path = source_path.strip().strip('"')
+    if not os.path.isfile(source_path):
+        return {"error": f"Source file '{source_path}' not found."}
+    
+    # Ensure inbox exists
+    if not os.path.exists(AUDIT_INBOX):
+        os.makedirs(AUDIT_INBOX, exist_ok=True)
+        
+    dest_path = os.path.join(AUDIT_INBOX, os.path.basename(source_path))
+    try:
+        shutil.copy2(source_path, dest_path)
+        return {
+            "success": True,
+            "message": f"File successfully copied to inbox.",
+            "source": source_path,
+            "destination": dest_path
+        }
+    except Exception as e:
+        return {"error": f"Failed to copy file: {str(e)}"}
+
 # ── Tool Definitions ──────────────────────────────────────────────────────────
 
 PATH_DESC = "Full local file path (e.g. C:\\Users\\...\\file.xlsx). Preferred over base64 for large files."
@@ -188,6 +211,23 @@ async def handle_list_tools() -> list[types.Tool]:
                         "description": "Optional: Full local path to a folder to scan (e.g., C:\\Users\\...\\Happy Delivery). Defaults to Desktop/Audit Files."
                     }
                 }
+            },
+        ),
+        types.Tool(
+            name="copy_to_audit_inbox",
+            description=(
+                "Copies a file from any local directory (e.g., Downloads) to the 'Audit Files' inbox. "
+                "Use this to satisfy the SOP requirement of moving files locally before analysis."
+            ),
+            inputSchema={
+                "type": "object", 
+                "properties": {
+                    "source_path": {
+                        "type": "string",
+                        "description": "Full local path to the source file (e.g., C:\\Users\\...\\Downloads\\report.xlsx)"
+                    }
+                },
+                "required": ["source_path"]
             },
         ),
 
@@ -272,7 +312,11 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="adp_census_sanity",
-            description="Applies opt-in auto-corrections to an ADP Census export. Returns a cleaned Excel workbook.",
+            description=(
+                "Applies opt-in auto-corrections to an ADP Census export. "
+                "MANDATORY: For stability, always use copy_to_audit_inbox first and then use 'file_path'. "
+                "Do NOT use 'file_base64' for files > 1MB."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -459,10 +503,9 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="paycom_census_sanity",
             description=(
-                "Applies opt-in auto-corrections to a Paycom Census export and writes a "
-                "cleaned Excel workbook (Corrected Census + Change Log sheets) to the user's "
-                "Desktop. All toggles default OFF — pass true on the ones you want applied. "
-                "Mirrors the Streamlit Paycom Sanity tool toggle set."
+                "Applies opt-in auto-corrections to a Paycom Census export. "
+                "MANDATORY: For stability, always use copy_to_audit_inbox first and then use 'file_path'. "
+                "Do NOT use 'file_base64' for files > 1MB."
             ),
             inputSchema={
                 "type": "object",
@@ -554,6 +597,11 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 "note": "Limited to first 500 files for performance." if len(files) >= 500 else "All files listed.",
                 "instruction": "Use the 'path' field from these files as arguments in other tools.",
             }
+            return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=_json_default))]
+
+        elif name == "copy_to_audit_inbox":
+            source = arguments.get("source_path")
+            result = copy_file_to_inbox(source)
             return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=_json_default))]
 
         elif name == "adp_total_comparison":

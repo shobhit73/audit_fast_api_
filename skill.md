@@ -1,34 +1,66 @@
-# Payroll Audit Agent - Standard Operating Procedure (SOP)
+## 1. Mandatory Pre-Flight Checks
+Before starting any audit or analysis, you **must** verify the data location.
+1.  **Check Location**: If the files are in `Downloads` or a client folder, you **must** use the `copy_to_audit_inbox` tool to move them to `C:\Users\shobhit.sharma\Desktop\Audit Files`.
+2.  **Verify Size**: If the file is >1MB, **never** use base64 fallback. Always use `file_path`.
+3.  **Confirm Consent**: Never apply `fix_` toggles in Sanity tools without explicit user approval for each toggle.
 
-This document defines the mandatory workflows for all payroll audits. Always follow these steps to ensure data integrity and prevent system timeouts.
+## 2. Analysis Agent (Trigger & Orchestration)
+**Trigger**: A new email from an implementer (e.g., Mercedes, Kadence) with census issues, or a manual request to "Audit Client X".
+1.  **Monitor**: Scan Gmail for the latest issue logs or resolutions for the specified client.
+2.  **Intelligence**: Parse the email to extract:
+    *   List of affected **Employee IDs**.
+    *   **Required Corrections** (e.g., "Change status to Inactive", "Fix FLSA for Driver roles").
+3.  **Plan**: Identify which core audit tools are needed (e.g., `paycom_census_sanity`, `selective_employee_extractor`).
 
-## 1. Discovery Phase (The "Scan")
-Before running any audit, you must identify the available files.
-*   **Tool**: `list_audit_files`
-*   **Action**: Scan the user's specified folder (e.g., `C:\Users\shobhit.sharma\Downloads\Happy Delivery`) or the default `C:\Users\shobhit.sharma\Desktop\Audit Files`.
-*   **Output**: Identify the Paycom/ADP CSVs, Uzio Registers, and Mapping files.
+## 2. Ingestion & Extraction Agent
+**CRITICAL**: Never read from remote servers or client folders directly.
+1.  **Copy**: Move master census/payroll files from the client's source folder (e.g., `Downloads/Happy Delivery`) to the local Desktop inbox using the **`copy_to_audit_inbox`** tool.
+2.  **Verify**: Use `list_audit_files` to confirm files are ready in `C:\Users\shobhit.sharma\Desktop\Audit Files`.
+3.  **Isolate**: Call `selective_employee_extractor` to pull only the problematic employees into a temporary "Working Set" CSV/Excel.
 
-## 2. Execution Phase (The "Audit")
-Once files are identified, run the appropriate audit tool.
-*   **Tools**: `paycom_total_comparison`, `adp_total_comparison`, `adp_census_audit`, etc.
-*   **Action**: Pass the full local paths discovered in the Scan phase.
-*   **Result**: The tool will return a summary and save a full `.xlsx` report to the **Audit Files** folder.
+## 3. Correction & Sanity Agent
+1.  **Apply Fixes**: Based on the Analysis Agent's findings, modify the "Working Set" data (e.g., update `Employee_Status` or `FLSA_Classification`).
+2.  **Sanity Check**: Run `paycom_census_sanity` or `adp_census_sanity` on the modified data to ensure it meets all Uzio ingestion rules.
+3.  **Finalize**: Save the corrected report to the `Audit Files` folder with a clear "CORRECTED" prefix.
 
-## 3. Analysis Phase (The "Deep Read")
-**CRITICAL**: Do not rely only on the summary returned by the audit tool for deep analysis.
-*   **Tool**: `read_audit_report`
-*   **Action**: Read the specific `.xlsx` file that was just saved in the `Audit Files` folder.
-*   **Benefit**: This prevents "JSON Overload" crashes and allows you to analyze 100% of the audit data safely.
+## 4. Communication & Reporting Agent
+1.  **Deep Read**: Use `read_audit_report` to analyze the final corrected file for any remaining anomalies.
+2.  **Summarize**: Create a concise summary of all changes made.
+3.  **Reply**: Draft or send a Gmail reply to the implementer (Mercedes/Kadence):
+    *   Confirming which IDs were fixed.
+    *   Attaching/Referencing the corrected filename in the `Audit Files` folder.
+    *   Highlighting any unresolved assumptions.
 
-## 4. Communication Phase (The "Action")
-Use the insights gathered from the Deep Read to fulfill user requests via Gmail.
-*   **Tool**: `gmail_create_draft` or `gmail_send_message`.
-*   **Action**: Draft summaries of mismatches, root cause analysis, or missing employee reports.
-*   **Reference**: Always mention the specific filename in the `Audit Files` folder so the user can verify.
+## 5. Advanced Workflows
 
-## 5. Client Folders SOP
-If a user mentions a client name (e.g., "Happy Delivery"), always check if they have a dedicated folder in `Downloads` or `Desktop` first using `list_audit_files`.
+### 5.1 Multi-Tool Cross-Reference (Deep Dive)
+**Scenario**: User asks for a deep dive into a specific employee after multiple audits (e.g., "Check Shobhit's status in both Census and Payment audits").
+1.  **Ingest**: Ensure all source files (Census ADP/Uzio, Payment ADP/Uzio) are copied to the `Audit Files` inbox.
+2.  **Audit**: Run all relevant audits (e.g., `adp_census_audit`, `adp_payment_audit`).
+3.  **Analyze**:
+    *   Use `read_audit_report` to open the newly generated reports from the `Audit Files` folder.
+    *   Search for the specific employee in both reports.
+    *   Summarize mismatches across both domains (e.g., "Active in Census but unpaid in Payment report").
+4.  **Resolve**: Draft a Gmail to the implementer (Mercedes) detailing the specific cross-domain discrepancies for that employee.
 
-## 6. Error Handling
-*   **Format Mismatch**: If you see "Excel format cannot be determined," it means the file is a CSV. All tools now support CSV, so ensure you are using the correct file extension in your logic.
-*   **SSN Bug**: All SSN duplicate checks now require an `ssn_col` argument. The tools are pre-configured to find this, but always ensure you are passing the identified column name.
+### 5.2 Gmail-Driven Corrections
+**Scenario**: Implementers provide resolutions or data updates via Gmail.
+1.  **Identify**: Use Gmail to find threads regarding census audits.
+2.  **Extract**: Identify Employee IDs and required changes.
+3.  **Isolate**: Use `selective_employee_extractor` to pull those employees from the master file in the `Audit Files` folder.
+4.  **Correct**: Apply changes and verify with the `paycom_census_sanity` tool.
+
+### 5.3 API Error Handling
+**Scenario**: The migration API returns a JSON error listing failing Employee IDs.
+1.  **Parse**: Extract IDs from the error JSON.
+2.  **Extract**: Use `selective_employee_extractor` to isolate the failing records.
+3.  **Analyze & Fix**: Compare against the error message, apply fixes, and re-run sanity checks.
+
+## 6. Client Specific Audits
+If the user mentions a specific client (e.g., "Happy Delivery"):
+1.  Scan the folder using `list_audit_files`.
+2.  **CRITICAL**: Always move/copy files to the `Audit Files` folder on the Desktop first. **Never** audit files directly from remote locations.
+
+## 7. Reporting & Communication
+*   **Action**: Summarize all corrections made and the final status of problematic records.
+*   **Verification**: Always provide the filename of the final corrected report in the `Audit Files` folder.
