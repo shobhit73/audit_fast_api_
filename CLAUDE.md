@@ -1,4 +1,4 @@
-# CLAUDE.md (v1.2)
+# CLAUDE.md (v1.3)
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -52,6 +52,9 @@ AUDIT_INBOX = r"C:\Users\shobhit.sharma\Desktop\Audit Files"
 ```
 
 **MANDATORY**: 100% of tool output files are consolidated in this folder. Claude Desktop must always check this folder via `list_audit_files` to find generated reports.
+
+#### Data Correction & Formatting
+The `apply_data_corrections` tool uses `openpyxl` to perform row-level updates based on **Employee ID**. This tool is specifically designed to **preserve all original Excel formatting** (colors, fonts, borders). Always prioritize this for "Implementer Overrides" over standard Pandas-based re-writes.
 
 #### File input convention (every MCP tool)
 
