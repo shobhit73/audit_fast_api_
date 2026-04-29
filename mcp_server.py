@@ -187,6 +187,74 @@ def copy_file_to_inbox(source_path):
     except Exception as e:
         return {"error": f"Failed to copy file: {str(e)}"}
 
+def apply_data_corrections(file_path, corrections_list):
+    """
+    Surgically updates specific cells in an Excel file using openpyxl to preserve formatting.
+    corrections_list: list of dicts like {'id': '123', 'column': 'Status', 'value': 'Inactive'}
+    """
+    import openpyxl
+    from utils.audit_utils import norm_id, norm_colname
+    
+    file_path = file_path.strip().strip('"')
+    if not os.path.isfile(file_path):
+        return {"error": f"File '{file_path}' not found."}
+    
+    try:
+        wb = openpyxl.load_workbook(file_path)
+        # Use first sheet if not specified (could be enhanced later)
+        ws = wb.active
+        
+        # 1. Identify columns
+        headers = [str(cell.value) for cell in ws[1]]
+        norm_headers = [norm_colname(h) for h in headers]
+        
+        # Find ID column
+        id_col_indices = [i for i, h in enumerate(norm_headers) if any(k in h for k in ["employee id", "employee code", "associate id"])]
+        if not id_col_indices:
+            return {"error": "Could not identify Employee ID column in the file."}
+        id_col_idx = id_col_indices[0] # 0-indexed
+        
+        results = []
+        for corr in corrections_list:
+            target_id = norm_id(corr.get('id'))
+            target_col = norm_colname(corr.get('column'))
+            new_val = corr.get('value')
+            
+            # Find target column index
+            col_idx = next((i for i, h in enumerate(norm_headers) if target_col in h), None)
+            if col_idx is None:
+                results.append({"id": target_id, "status": "Error", "message": f"Column '{corr.get('column')}' not found."})
+                continue
+            
+            # 2. Find row and update
+            found = False
+            for row_idx in range(2, ws.max_row + 1):
+                cell_val = norm_id(ws.cell(row=row_idx, column=id_col_idx + 1).value)
+                if cell_val == target_id:
+                    ws.cell(row=row_idx, column=col_idx + 1).value = new_val
+                    results.append({"id": target_id, "column": corr.get('column'), "status": "Success"})
+                    found = True
+                    break
+            
+            if not found:
+                results.append({"id": target_id, "status": "Error", "message": "Employee ID not found in file."})
+        
+        # 3. Save as new file with suffix
+        stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        base, ext = os.path.splitext(file_path)
+        out_path = f"{base}_OVERRIDDEN_{stamp}{ext}"
+        wb.save(out_path)
+        
+        return {
+            "success": True,
+            "output_file": out_path,
+            "applied_changes": results
+        }
+        
+    except Exception as e:
+        import traceback
+        return {"error": f"Correction failed: {str(e)}\n{traceback.format_exc()}"}
+
 # ── Tool Definitions ──────────────────────────────────────────────────────────
 
 PATH_DESC = "Full local file path (e.g. C:\\Users\\...\\file.xlsx). Preferred over base64 for large files."
@@ -228,6 +296,37 @@ async def handle_list_tools() -> list[types.Tool]:
                     }
                 },
                 "required": ["source_path"]
+            },
+        ),
+        types.Tool(
+            name="apply_data_corrections",
+            description=(
+                "Performs surgical row-level updates to an Excel file using an Employee ID. "
+                "Preserves all original formatting (colors, fonts, borders). "
+                "Use this for 'Implementer Overrides' after a sanity check."
+            ),
+            inputSchema={
+                "type": "object", 
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Full local path to the Excel file to modify."
+                    },
+                    "corrections": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "description": "Mandatory Employee ID"},
+                                "column": {"type": "string", "description": "Exact or normalized column name to update"},
+                                "value": {"type": "string", "description": "New value to write into the cell"}
+                            },
+                            "required": ["id", "column", "value"]
+                        },
+                        "description": "List of specific corrections to apply."
+                    }
+                },
+                "required": ["file_path", "corrections"]
             },
         ),
 
@@ -602,6 +701,12 @@ async def handle_call_tool(name: str, arguments: dict | None):
         elif name == "copy_to_audit_inbox":
             source = arguments.get("source_path")
             result = copy_file_to_inbox(source)
+            return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=_json_default))]
+
+        elif name == "apply_data_corrections":
+            path = arguments.get("file_path")
+            corrs = arguments.get("corrections", [])
+            result = apply_data_corrections(path, corrs)
             return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=_json_default))]
 
         elif name == "adp_total_comparison":

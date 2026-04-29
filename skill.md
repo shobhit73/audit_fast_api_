@@ -1,4 +1,4 @@
-# Claude Desktop - Multi-Agent Payroll Migration SOP (v1.2)
+# Claude Desktop - Multi-Agent Payroll Migration SOP (v1.3)
 Before starting any audit or analysis, you **must** verify the data location.
 1.  **Check Location**: If the files are in `Downloads` or a client folder, you **must** use the `copy_to_audit_inbox` tool to move them to `C:\Users\shobhit.sharma\Desktop\Audit Files`.
 2.  **Verify Size**: If the file is >1MB, **never** use base64 fallback. Always use `file_path`.
@@ -10,7 +10,7 @@ Before starting any audit or analysis, you **must** verify the data location.
 2.  **Intelligence**: Parse the email to extract:
     *   List of affected **Employee IDs**.
     *   **Required Corrections** (e.g., "Change status to Inactive", "Fix FLSA for Driver roles").
-3.  **Plan**: Identify which core audit tools are needed (e.g., `paycom_census_sanity`, `selective_employee_extractor`).
+3.  **Plan**: Identify which core audit tools are needed (e.g., `paycom_census_sanity`, `apply_data_corrections`).
 
 ## 2. Ingestion & Extraction Agent
 **CRITICAL**: Never read from remote servers or client folders directly.
@@ -18,10 +18,14 @@ Before starting any audit or analysis, you **must** verify the data location.
 2.  **Verify**: Use `list_audit_files` to confirm files are ready in `C:\Users\shobhit.sharma\Desktop\Audit Files`.
 3.  **Isolate**: Call `selective_employee_extractor` to pull only the problematic employees into a temporary "Working Set" CSV/Excel.
 
-## 3. Correction & Sanity Agent
-1.  **Apply Fixes**: Based on the Analysis Agent's findings, modify the "Working Set" data (e.g., update `Employee_Status` or `FLSA_Classification`).
-2.  **Sanity Check**: Run `paycom_census_sanity` or `adp_census_sanity` on the modified data to ensure it meets all Uzio ingestion rules.
-3.  **Finalize**: Save the corrected report to the `Audit Files` folder with a clear "CORRECTED" prefix.
+## 4. Correction & Sanity Agent
+1.  **Sanity First**: Run `paycom_census_sanity` or `adp_census_sanity` with **all toggles OFF** first to identify standard errors.
+2.  **Implementer Override**: 
+    *   **Tool**: `apply_data_corrections`
+    *   **Action**: Apply the manual resolutions from Gmail/Implementers directly to the master file or working set.
+    *   **Formatting**: This tool **preserves 100% of formatting**, making it the "Source of Truth" for final uploads.
+    *   **Strict ID**: You MUST provide an Employee ID for every correction.
+3.  **Finalize**: Save the corrected report to the `Audit Files` folder with an `_OVERRIDDEN` suffix.
 
 ## 4. Communication & Reporting Agent
 1.  **Deep Read**: Use `read_audit_report` to analyze the final corrected file for any remaining anomalies.
@@ -47,14 +51,13 @@ Before starting any audit or analysis, you **must** verify the data location.
 **Scenario**: Implementers provide resolutions or data updates via Gmail.
 1.  **Identify**: Use Gmail to find threads regarding census audits.
 2.  **Extract**: Identify Employee IDs and required changes.
-3.  **Isolate**: Use `selective_employee_extractor` to pull those employees from the master file in the `Audit Files` folder.
-4.  **Correct**: Apply changes and verify with the `paycom_census_sanity` tool.
+3.  **Override**: Use `apply_data_corrections` to surgically update the master file while preserving formatting.
 
 ### 5.3 API Error Handling
 **Scenario**: The migration API returns a JSON error listing failing Employee IDs.
 1.  **Parse**: Extract IDs from the error JSON.
-2.  **Extract**: Use `selective_employee_extractor` to isolate the failing records.
-3.  **Analyze & Fix**: Compare against the error message, apply fixes, and re-run sanity checks.
+2.  **Analyze**: Compare against the error message, identify the fix.
+3.  **Correct**: Use `apply_data_corrections` to fix the IDs in the source file.
 
 ## 6. Client Specific Audits
 If the user mentions a specific client (e.g., "Happy Delivery"):
