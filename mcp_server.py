@@ -679,8 +679,8 @@ async def handle_call_tool(name: str, arguments: dict | None):
             )
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
-            # Save output to Desktop for easy access
-            out_path = os.path.join(os.path.expanduser("~"), "Desktop", f"ADP_Cleaned_{stamp}.xlsx")
+            # Save output to Audit Files folder for consistency
+            out_path = os.path.join(AUDIT_INBOX, f"ADP_Cleaned_{stamp}.xlsx")
             with open(out_path, "wb") as f:
                 f.write(xlsx_bytes)
             payload = {
@@ -809,7 +809,8 @@ async def handle_call_tool(name: str, arguments: dict | None):
             )
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
-            out_path = os.path.join(os.path.expanduser("~"), "Desktop", f"Paycom_Cleaned_{stamp}.xlsx")
+            # Save output to Audit Files folder for consistency
+            out_path = os.path.join(AUDIT_INBOX, f"Paycom_Cleaned_{stamp}.xlsx")
             with open(out_path, "wb") as f:
                 f.write(xlsx_bytes)
             payload = {

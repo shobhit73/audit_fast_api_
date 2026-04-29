@@ -1,4 +1,4 @@
-# Claude Desktop - Multi-Agent Payroll Migration SOP (v1.1)
+# Claude Desktop - Multi-Agent Payroll Migration SOP (v1.2)
 Before starting any audit or analysis, you **must** verify the data location.
 1.  **Check Location**: If the files are in `Downloads` or a client folder, you **must** use the `copy_to_audit_inbox` tool to move them to `C:\Users\shobhit.sharma\Desktop\Audit Files`.
 2.  **Verify Size**: If the file is >1MB, **never** use base64 fallback. Always use `file_path`.
@@ -63,4 +63,4 @@ If the user mentions a specific client (e.g., "Happy Delivery"):
 
 ## 7. Reporting & Communication
 *   **Action**: Summarize all corrections made and the final status of problematic records.
-*   **Verification**: Always provide the filename of the final corrected report in the `Audit Files` folder.
+*   **Verification**: All tool output reports are **MANDATORY** saved to the `Audit Files` folder on the Desktop. Use `list_audit_files` to verify the filename and then `read_audit_report` for analysis.

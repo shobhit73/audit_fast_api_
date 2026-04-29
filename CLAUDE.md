@@ -1,4 +1,4 @@
-# CLAUDE.md (v1.1)
+# CLAUDE.md (v1.2)
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -51,7 +51,7 @@ Critical at the top of the file: `sys.stdout = sys.stderr`. Never remove this. S
 AUDIT_INBOX = r"C:\Users\shobhit.sharma\Desktop\Audit Files"
 ```
 
-This path is **hardcoded to the original developer's machine**. The `list_audit_files` tool reads this folder so Claude Desktop can discover files without the user pasting paths. If you're working in a different environment, this needs to be configurable (env var) before it's useful elsewhere.
+**MANDATORY**: 100% of tool output files are consolidated in this folder. Claude Desktop must always check this folder via `list_audit_files` to find generated reports.
 
 #### File input convention (every MCP tool)
 
