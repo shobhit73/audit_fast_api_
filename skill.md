@@ -1,4 +1,4 @@
-## 1. Mandatory Pre-Flight Checks
+# Claude Desktop - Multi-Agent Payroll Migration SOP (v1.1)
 Before starting any audit or analysis, you **must** verify the data location.
 1.  **Check Location**: If the files are in `Downloads` or a client folder, you **must** use the `copy_to_audit_inbox` tool to move them to `C:\Users\shobhit.sharma\Desktop\Audit Files`.
 2.  **Verify Size**: If the file is >1MB, **never** use base64 fallback. Always use `file_path`.
