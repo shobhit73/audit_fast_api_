@@ -204,20 +204,32 @@ def apply_data_corrections(file_path, corrections_list):
         # Use first sheet if not specified (could be enhanced later)
         ws = wb.active
         
-        # 1. Identify columns
-        headers = [str(cell.value) for cell in ws[1]]
-        norm_headers = [norm_colname(h) for h in headers]
+        # 1. Identify header row (some files have junk rows at the top)
+        header_row_idx = 1
+        id_keywords = ["employee id", "employee code", "associate id", "file #", "id#"]
         
-        # Find ID column
-        id_col_indices = [i for i, h in enumerate(norm_headers) if any(k in h for k in ["employee id", "employee code", "associate id"])]
+        for r in range(1, 20): # Peek first 20 rows
+            row_vals = [norm_colname(cell.value).lower() for cell in ws[r]]
+            if any(any(k in v for k in id_keywords) for v in row_vals):
+                header_row_idx = r
+                norm_headers = row_vals
+                headers = [str(cell.value) for cell in ws[r]]
+                break
+        else:
+            # Fallback to row 1 if no keywords found
+            headers = [str(cell.value) for cell in ws[1]]
+            norm_headers = [norm_colname(h).lower() for h in headers]
+        
+        # Find ID column index
+        id_col_indices = [i for i, h in enumerate(norm_headers) if any(k in h for k in id_keywords)]
         if not id_col_indices:
-            return {"error": "Could not identify Employee ID column in the file."}
-        id_col_idx = id_col_indices[0] # 0-indexed
+            return {"error": f"Could not identify Employee ID column. Found headers in row {header_row_idx}: {headers}"}
+        id_col_idx = id_col_indices[0]
         
         results = []
         for corr in corrections_list:
             target_id = norm_id(corr.get('id'))
-            target_col = norm_colname(corr.get('column'))
+            target_col = norm_colname(corr.get('column')).lower()
             new_val = corr.get('value')
             
             # Find target column index
@@ -228,7 +240,7 @@ def apply_data_corrections(file_path, corrections_list):
             
             # 2. Find row and update
             found = False
-            for row_idx in range(2, ws.max_row + 1):
+            for row_idx in range(header_row_idx + 1, ws.max_row + 1):
                 cell_val = norm_id(ws.cell(row=row_idx, column=id_col_idx + 1).value)
                 if cell_val == target_id:
                     ws.cell(row=row_idx, column=col_idx + 1).value = new_val
