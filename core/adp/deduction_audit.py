@@ -1,6 +1,11 @@
 import pandas as pd
 import io
-from utils.audit_utils import get_identity_match_map, clean_money_val, norm_colname
+import re
+from utils.audit_utils import get_identity_match_map, norm_ssn_canonical, clean_money_val, norm_colname
+
+def norm_col(c):
+    if c is None: return ""
+    return str(c).strip().replace("\n", " ").strip()
 
 def read_uzio_deduction(file_content):
     xls = pd.ExcelFile(io.BytesIO(file_content), engine='openpyxl')
@@ -14,13 +19,21 @@ def read_uzio_deduction(file_content):
                 break
         if header_row_idx is not None:
              df = pd.read_excel(xls, sheet_name=sheet, header=header_row_idx, dtype=str)
-             df.columns = [norm_colname(c) for c in df.columns]
+             df.columns = [norm_col(c) for c in df.columns]
              return df
     return None
 
 def run_adp_deduction_audit(uzio_content, adp_content, mapping_dict):
+    """
+    Production-grade deduction audit logic.
+    uzio_content: bytes
+    adp_content: bytes
+    mapping_dict: dict of {ADP_Deduction_Name: Uzio_Deduction_Name}
+    """
     df_uzio = read_uzio_deduction(uzio_content)
-    
+    if df_uzio is None:
+        return {"error": "Could not find 'Employee Id' and 'Deduction Name' in Uzio file."}
+
     xls_adp = pd.ExcelFile(io.BytesIO(adp_content), engine='openpyxl')
     adp_sheet = xls_adp.sheet_names[0]
     peek_df = pd.read_excel(xls_adp, sheet_name=adp_sheet, nrows=20, header=None)
@@ -32,8 +45,8 @@ def run_adp_deduction_audit(uzio_content, adp_content, mapping_dict):
             break
     df_adp = pd.read_excel(xls_adp, sheet_name=adp_sheet, header=header_row_idx, dtype=str)
     
-    df_uzio.columns = [norm_colname(c) for c in df_uzio.columns]
-    df_adp.columns = [norm_colname(c) for c in df_adp.columns]
+    df_uzio.columns = [norm_col(c) for c in df_uzio.columns]
+    df_adp.columns = [norm_col(c) for c in df_adp.columns]
 
     mapping = {k.lower(): v for k, v in mapping_dict.items()}
     mapping.update(mapping_dict)
@@ -49,6 +62,11 @@ def run_adp_deduction_audit(uzio_content, adp_content, mapping_dict):
     uz_ded_col = next((c for c in df_uzio.columns if "deduction" in c.lower() and "name" in c.lower()), None)
     uz_amt_col = next((c for c in df_uzio.columns if "amount" in c.lower() or "percent" in c.lower()), None)
     uz_ssn_col = next((c for c in df_uzio.columns if "ssn" in c.lower()), None)
+
+    if not all([adp_id_col, adp_code_col, adp_amt_col]):
+        return {"error": f"ADP Sheet missing required columns. Found: {list(df_adp.columns)}"}
+    if not all([uz_id_col, uz_ded_col, uz_amt_col]):
+        return {"error": f"Uzio Sheet missing required columns. Found: {list(df_uzio.columns)}"}
 
     uz_to_adp_id_map = {}
     if uz_ssn_col and adp_ssn_col:
@@ -90,11 +108,35 @@ def run_adp_deduction_audit(uzio_content, adp_content, mapping_dict):
         adp_val = row["ADP_Amount"] if pd.notna(row["ADP_Amount"]) else 0.0
         uz_val = row["Uzio_Amount"] if pd.notna(row["Uzio_Amount"]) else 0.0
         status = "Data Match" if abs(adp_val - uz_val) < 0.01 else "Data Mismatch"
+        
+        adp_id = row["Employee_ID"] if pd.notna(row["Employee_ID"]) else ""
+        uz_id = row["Uzio_Employee_ID"] if pd.notna(row["Uzio_Employee_ID"]) else ""
+        
         results.append({
-            "Employee ID": row["Uzio_Employee_ID"] if pd.notna(row["Uzio_Employee_ID"]) else row["Employee_ID"],
+            "Employee ID": uz_id if uz_id else adp_id,
             "Deduction": row["Uzio_Deduction_Name"] if pd.notna(row["Uzio_Deduction_Name"]) else row["ADP_Description"],
             "ADP Amount": adp_val,
             "Uzio Amount": uz_val,
             "Status": status
         })
-    return results
+    
+    df_res = pd.DataFrame(results)
+    
+    # Summary tab: counts per deduction
+    summary_data = {}
+    if not df_res.empty:
+        for ded, grp in df_res.groupby("Deduction"):
+            summary_data[ded] = {"Total": len(grp), "Match": (grp["Status"] == "Data Match").sum(), "Mismatch": (grp["Status"] == "Data Mismatch").sum()}
+    df_summary = pd.DataFrame([{"Metric": k, **v} for k, v in summary_data.items()])
+    
+    # Field_Summary_By_Status: pivot of Deduction x Status counts
+    field_summary = []
+    if not df_res.empty:
+        pivot = df_res.groupby(["Deduction", "Status"]).size().unstack(fill_value=0).reset_index()
+        field_summary = pivot.to_dict(orient="records")
+    
+    return {
+        "Summary": df_summary.to_dict(orient="records") if not df_summary.empty else [],
+        "Field_Summary_By_Status": field_summary,
+        "Audit Details": results
+    }

@@ -181,13 +181,46 @@ try:
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/audit/paycom/census-sanity")
-    async def paycom_census_sanity(file: UploadFile = File(...)):
+    async def paycom_census_sanity(
+        file: UploadFile = File(...),
+        # Auto-correction toggles (mirror of Streamlit Paycom Sanity tool — all default OFF)
+        fix_flsa: bool = Form(False),
+        fix_emails: bool = Form(False),
+        fix_driver_smart: bool = Form(False),
+        fix_license: bool = Form(False),
+        fix_status: bool = Form(False),
+        fix_type: bool = Form(False),
+        fix_position: bool = Form(False),
+        fix_dol_status: bool = Form(False),
+        fix_zip: bool = Form(False),
+        sort_by_manager: bool = Form(False),
+    ):
         try:
             content = await file.read()
             from core.paycom.census_audit import PAYCOM_FIELD_MAP
-            resolved_map = {k: v for k, v in PAYCOM_FIELD_MAP.items()}
-            df = pd.read_excel(io.BytesIO(content), dtype=str)
-            return run_census_sanity_check(df, resolved_map)
+            fix_options = {
+                'fix_flsa': fix_flsa, 'fix_emails': fix_emails,
+                'fix_driver_smart': fix_driver_smart, 'fix_license': fix_license,
+                'fix_status': fix_status, 'fix_inactive': fix_status, 'fix_type': fix_type,
+                'fix_position': fix_position, 'fix_job_title': fix_position,
+                'fix_dol_status': fix_dol_status, 'fix_zip': fix_zip,
+            }
+            xlsx_bytes, summary = generate_corrected_census_xlsx(
+                content, PAYCOM_FIELD_MAP, fix_options=fix_options,
+                filename=file.filename or "upload.xlsx",
+                sort_by_manager=sort_by_manager,
+            )
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            headers = {
+                "Content-Disposition": f'attachment; filename="Paycom_Cleaned_{stamp}.xlsx"',
+                "X-Sanity-Summary": f'rows={summary["rows_total"]}; warnings={summary["rows_with_warnings"]}; changes={summary["changes_logged"]}',
+            }
+            return StreamingResponse(
+                io.BytesIO(xlsx_bytes),
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers=headers,
+            )
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
     from core.misc_audits import run_adp_emergency_audit, run_paycom_emergency_audit, run_adp_license_audit, run_adp_timeoff_audit, run_paycom_timeoff_audit, run_paycom_payment_audit

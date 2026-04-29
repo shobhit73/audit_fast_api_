@@ -62,6 +62,17 @@ def clean_money_val(x):
     try: return float(s)
     except: return 0.0
 
+def smart_read_df(content, **kwargs):
+    """Attempts to read content as Excel, falls back to CSV if it fails."""
+    try:
+        return pd.read_excel(io.BytesIO(content), **kwargs)
+    except (ValueError, Exception):
+        try:
+            return pd.read_csv(io.BytesIO(content), **kwargs)
+        except:
+            # Last resort: empty df with columns from kwargs if possible
+            return pd.DataFrame()
+
 def norm_colname(c: str) -> str:
     if c is None: return ""
     c = str(c).replace("\n", " ").replace("\r", " ").replace("\u00A0", " ")
@@ -154,8 +165,9 @@ def read_uzio_raw_file(content):
             df['Employee ID'] = df['Employee ID'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         return df
     except Exception as e:
-        print(f"Error reading Uzio Raw File: {e}")
-        return None
+        import sys
+        sys.stderr.write(f"Error reading Uzio Raw File: {e}\n")
+        return pd.DataFrame() # Return empty DF instead of None
 
 def is_hourly_only_job_title(jt_val: str) -> bool:
     jt = jt_val.strip().lower()
@@ -186,3 +198,48 @@ def normalize_space_and_case(x):
 def as_float_or_none(x):
     try: return float(str(x).replace(",", "").replace("$", "").strip())
     except: return None
+
+def detect_duplicate_ssns(df, ssn_col):
+    """Identifies duplicate SSNs in a dataframe."""
+    df = df.copy()
+    df['__norm_ssn'] = df[ssn_col].apply(norm_ssn_canonical)
+    dupes = df[df['__norm_ssn'] != ""][df.duplicated(subset=['__norm_ssn'], keep=False)]
+    return dupes
+
+def normalize_paytype_text(x):
+    return str(norm_blank(x)).strip().lower()
+
+def paytype_bucket(pt_norm: str) -> str:
+    if "salary" in pt_norm or "salaried" in pt_norm: return "salaried"
+    if "hourly" in pt_norm or "hour" in pt_norm: return "hourly"
+    return "other"
+
+def normalize_reason_text(x):
+    s = str(norm_blank(x)).strip().replace("\u00A0", " ")
+    s = s.replace("’", "'").replace("“", '"').replace("”", '"')
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.strip('"').strip("'").lower()
+
+def is_termination_reason_field(f: str) -> bool:
+    return "termination reason" in norm_colname(f).lower()
+
+def is_employment_status_field(f: str) -> bool:
+    return any(k in norm_colname(f).lower() for k in ["employment status", "position status", "worker status"])
+
+def status_contains_any(s: str, needles: list) -> bool:
+    s = str(s).lower()
+    return any(n in s for n in needles)
+
+def uzio_is_active(s: str) -> bool:
+    return "active" in str(s).lower()
+
+def uzio_is_terminated(s: str) -> bool:
+    return any(x in str(s).lower() for x in ["terminated", "inactive", "quit", "resign"])
+
+ALLOWED_TERM_REASONS = {
+    "quit without notice", "no reason given", "misconduct", "abandoned job",
+    "advancement (better job with higher pay)", "no-show (never started employment)",
+    "performance", "personal", "scheduling conflicts (schedules don't work)",
+    "attendance", "reduction in force", "reorganization", "mutual agreement",
+    "import created action", "advancement", "no-show", "management", "layoff"
+}

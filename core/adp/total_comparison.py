@@ -1,18 +1,20 @@
 import pandas as pd
 import io
+import re
 from utils.audit_utils import clean_money_val, norm_colname, normalize_id, format_pay_date, find_header_and_data
 
 def calculate_totals(df, header_top, column_names):
-    """Sum up values for columns that match any of the provided names using vectorized operations."""
+    """Sum up values for columns that match any of the provided names, handling multi-row headers."""
     found_cols = []
+    emp_tots = {}
+    emp_row_counts = {}
     
-    # 1. Identify key columns
+    # --- STRICT ROW FILTERING ---
     id_col = next((c for c in df.columns if any(x in str(c).lower() for x in ["associate id", "employee id", "file #"])), None)
     date_col = next((c for c in df.columns if any(x == str(c).lower().strip() for x in ["pay date", "check date"])), None)
     if date_col is None:
         date_col = next((c for c in df.columns if any(x in str(c).lower() for x in ["pay date", "period end", "check date"])), None)
     
-    # 2. Filter data (Remove grand totals and NAs)
     if id_col:
         df_clean = df[df[id_col].notna()].copy()
         df_clean[id_col] = df_clean[id_col].apply(normalize_id)
@@ -24,7 +26,6 @@ def calculate_totals(df, header_top, column_names):
         mask = df.iloc[:, 0].astype(str).str.lower().str.contains("total|grand", na=False)
         df_clean = df[~mask].copy()
     
-    # 3. Identify columns to sum
     norm_cols_main = {norm_colname(c).lower(): i for i, c in enumerate(df.columns)}
     norm_cols_top = {}
     if header_top:
@@ -53,36 +54,28 @@ def calculate_totals(df, header_top, column_names):
                     if not any(x in main_h for x in ['wages', 'hours', 'rate', 'basis', 'taxable']):
                         cols_to_sum.append(df.columns[k])
                         found_cols.append(f"{df.columns[k]}")
-    
-    if not cols_to_sum:
-        return 0.0, [], {}, {}
-
-    # 4. Vectorized calculation
-    unique_cols = list(set(cols_to_sum))
-    for c in unique_cols:
-        df_clean[c] = df_clean[c].apply(clean_money_val)
-    
-    if id_col and date_col:
-        df_clean[date_col] = df_clean[date_col].apply(format_pay_date)
-        # Group by ID and Date, then sum the numeric columns
-        grouped = df_clean.groupby([id_col, date_col])
-        emp_tots_series = grouped[unique_cols].sum().sum(axis=1)
-        emp_counts_series = grouped.size()
+                        
+    for _, row in df_clean.iterrows():
+        eid = row[id_col] if id_col else "Unknown"
+        pay_date = format_pay_date(row[date_col]) if date_col else "Unknown"
         
-        emp_tots = emp_tots_series.to_dict()
-        emp_row_counts = emp_counts_series.to_dict()
-    else:
-        # Fallback if ID/Date missing
-        total_sum = df_clean[unique_cols].sum().sum()
-        return float(total_sum), found_cols, {}, {}
+        row_tot = sum(clean_money_val(row[c]) for c in set(cols_to_sum))
+        
+        key = (eid, pay_date)
+        if key not in emp_tots:
+            emp_tots[key] = 0.0
+            emp_row_counts[key] = 0
+        emp_tots[key] += row_tot
+        emp_row_counts[key] += 1
             
-    return float(emp_tots_series.sum()), found_cols, emp_tots, emp_row_counts
+    return sum(emp_tots.values()), found_cols, emp_tots, emp_row_counts
 
 def run_adp_total_comparison(adp_files_data, uzio_file_data, mappings):
     """
-    Main logic to compare totals.
-    adp_files_data: list of (content, filename)
-    uzio_file_data: (content, filename)
+    Main logic to compare totals based on mappings.
+    adp_files_data: list of (content_bytes, filename)
+    uzio_file_data: (content_bytes, filename)
+    mappings: list of dicts with Category, ADP_Name, UZIO_Name
     """
     df_uzio, uzio_top, _ = find_header_and_data(uzio_file_data[0], uzio_file_data[1])
     adp_data_list = []
@@ -93,6 +86,10 @@ def run_adp_total_comparison(adp_files_data, uzio_file_data, mappings):
     results = []
     employee_mismatches = []
     
+    # --- Global Employee Collection ---
+    global_emp_adp = {} # {eid: total}
+    global_emp_uzio = {} # {eid: total}
+
     unique_uzio_items = {}
     for m in mappings:
         u_name = m["UZIO_Name"]
@@ -103,6 +100,7 @@ def run_adp_total_comparison(adp_files_data, uzio_file_data, mappings):
     for u_name, data in unique_uzio_items.items():
         cat = data["Category"]
         adp_names = data["ADP_Names"]
+        
         adp_total = 0.0
         adp_cols = []
         adp_emp_detail = {}
@@ -115,6 +113,9 @@ def run_adp_total_comparison(adp_files_data, uzio_file_data, mappings):
             for (eid, p_date), v in emp_m.items():
                 if eid not in adp_emp_detail: adp_emp_detail[eid] = {}
                 adp_emp_detail[eid][p_date] = adp_emp_detail[eid].get(p_date, 0.0) + v
+                # Aggregate globally
+                global_emp_adp[eid] = global_emp_adp.get(eid, 0.0) + v
+                
             for (eid, p_date), c_val in emp_c.items():
                 if eid not in adp_emp_counts: adp_emp_counts[eid] = {}
                 adp_emp_counts[eid][p_date] = adp_emp_counts[eid].get(p_date, 0) + c_val
@@ -124,6 +125,8 @@ def run_adp_total_comparison(adp_files_data, uzio_file_data, mappings):
         for (eid, p_date), v in uzio_emp_m.items():
             if eid not in uzio_emp_detail: uzio_emp_detail[eid] = {}
             uzio_emp_detail[eid][p_date] = uzio_emp_detail[eid].get(p_date, 0.0) + v
+            # Aggregate globally
+            global_emp_uzio[eid] = global_emp_uzio.get(eid, 0.0) + v
         
         diff = uzio_total - adp_total
         status = "Match" if abs(diff) <= 0.02 else "Mismatch"
@@ -165,7 +168,26 @@ def run_adp_total_comparison(adp_files_data, uzio_file_data, mappings):
                                 "Difference": round(date_diff, 2),
                                 "Multiple ADP Entries": multiple_entries
                             })
+
+    all_employee_details = []
+    all_emp_ids = set(global_emp_adp.keys()).union(set(global_emp_uzio.keys()))
+    for eid in sorted(all_emp_ids):
+        if eid == "Unknown": continue
+        val_a = global_emp_adp.get(eid, 0.0)
+        val_u = global_emp_uzio.get(eid, 0.0)
+        diff = val_u - val_a
+        all_employee_details.append({
+            "Associate ID": eid,
+            "ADP Total": round(val_a, 2),
+            "UZIO Total": round(val_u, 2),
+            "Total Difference": round(diff, 2),
+            "Status": "Match" if abs(diff) <= 0.02 else "Mismatch"
+        })
+
+    mismatches_only = [r for r in results if r["Status"] == "Mismatch"]
     return {
-        "summary": results,
-        "mismatches": employee_mismatches
+        "Full Comparison": results,
+        "Mismatches Only": mismatches_only,
+        "Employee Mismatches": employee_mismatches,
+        "All Employee Details": all_employee_details
     }

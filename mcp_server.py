@@ -1,13 +1,19 @@
 import json
 import base64
+import os
+import numpy as np
 from mcp.server.models import InitializationOptions
 from mcp.server import NotificationOptions, Server
 from mcp.server.sse import SseServerTransport
 import mcp.types as types
+import sys
+
+# ── Drop-folder: user puts files here, Claude picks them up automatically ──
+AUDIT_INBOX = r"C:\Users\shobhit.sharma\Desktop\Audit Files"
 
 # --- Core Imports ---
 from core.adp.total_comparison import run_adp_total_comparison
-from core.adp.census_audit import run_adp_census_audit
+from core.adp.census_audit import run_adp_census_audit, ADP_FIELD_MAP
 from core.adp.deduction_audit import run_adp_deduction_audit
 from core.adp.payment_audit import run_adp_payment_audit
 from core.adp.withholding_audit import run_adp_withholding_audit
@@ -17,13 +23,12 @@ from core.paycom.total_comparison import run_paycom_total_comparison
 from core.paycom.census_audit import run_paycom_census_audit, PAYCOM_FIELD_MAP
 from core.paycom.withholding_audit import run_paycom_withholding_audit
 from core.paycom.sql_master import run_paycom_sql_master
+from core.paycom.payment_audit import run_paycom_payment_audit
+from core.paycom.misc_audits import run_paycom_emergency_audit, run_paycom_timeoff_audit
 
-from core.adp.census_audit import ADP_FIELD_MAP
 from core.census.sanity_check import run_census_sanity_check, generate_corrected_census_xlsx
-from core.misc_audits import (
-    run_adp_emergency_audit, run_paycom_emergency_audit, 
-    run_adp_license_audit, run_adp_timeoff_audit, 
-    run_paycom_timeoff_audit, run_paycom_payment_audit
+from core.adp.misc_audits import (
+    run_adp_emergency_audit, run_adp_license_audit, run_adp_timeoff_audit
 )
 
 from starlette.applications import Starlette
@@ -31,21 +36,184 @@ from starlette.routing import Mount, Route
 
 server = Server("audit-tool-server")
 
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _json_default(o):
+    """Custom JSON encoder for numpy types and other non-serializable objects."""
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if hasattr(o, "isoformat"):  # handles datetime, Timestamp, etc.
+        return o.isoformat()
+    # Handle pandas types specifically if numpy check isn't enough
+    if hasattr(o, "item") and callable(o.item):
+        return o.item()
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+def save_results_to_excel(results, name_prefix):
+    """Saves results (list of dicts OR dict of lists) to an Excel file on the Desktop."""
+    import pandas as pd
+    from datetime import datetime
+    
+    if not results:
+        return {"summary": "No results", "file_path": None}
+        
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    filename = f"{name_prefix}_{stamp}.xlsx"
+    
+    # Ensure the Audit Files directory exists
+    if not os.path.exists(AUDIT_INBOX):
+        os.makedirs(AUDIT_INBOX, exist_ok=True)
+        
+    out_path = os.path.join(AUDIT_INBOX, filename)
+    
+    if isinstance(results, list):
+        df = pd.DataFrame(results)
+        df.to_excel(out_path, index=False)
+        summary = {
+            "total_rows": len(results),
+            "file_path": out_path,
+            "message": f"Full report saved to 'Audit Files' folder as {filename}.",
+            "data": results if len(results) < 2000 else results[:500],
+            "note": "Full data returned in response." if len(results) < 2000 else "Data truncated due to size."
+        }
+        if "Status" in df.columns:
+            summary["counts_by_status"] = df["Status"].value_counts().to_dict()
+        return summary
+        
+    elif isinstance(results, dict):
+        # Handle dict of lists (multiple sheets)
+        with pd.ExcelWriter(out_path) as writer:
+            summary_info = {"file_path": out_path, "message": f"Report saved to 'Audit Files' folder as {filename}."}
+            for sheet_name, data in results.items():
+                if isinstance(data, list) and data:
+                    df = pd.DataFrame(data)
+                    df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+                    summary_info[f"{sheet_name}_count"] = len(data)
+                    # Return full data to Claude if it's reasonably sized (< 2000 rows)
+                    if len(data) < 2000:
+                        summary_info[sheet_name] = data
+                    else:
+                        summary_info[sheet_name] = data[:500]
+                        summary_info[f"{sheet_name}_note"] = "Data truncated in response due to size. Full data in Excel file."
+                else:
+                    summary_info[sheet_name] = data
+            return summary_info
+            
+    return {"error": "Unsupported results format"}
+
+def load_file(arguments: dict, path_key: str, b64_key: str) -> bytes:
+    """Load a file from a local path OR fall back to base64-encoded content."""
+    path = arguments.get(path_key)
+    if path:
+        path = path.strip().strip('"')
+        with open(path, "rb") as f:
+            return f.read()
+    b64 = arguments.get(b64_key)
+    if b64:
+        return base64.b64decode(b64)
+    return b""
+
+def load_files_list(arguments: dict, paths_key: str, b64_key: str):
+    """Load a list of files from local paths OR base64 list. Returns list of (bytes, name)."""
+    paths = arguments.get(paths_key, [])
+    if paths:
+        result = []
+        for p in paths:
+            p = p.strip().strip('"')
+            with open(p, "rb") as f:
+                result.append((f.read(), os.path.basename(p)))
+        return result
+    b64_list = arguments.get(b64_key, [])
+    return [(base64.b64decode(b), f"file_{i}.xlsx") for i, b in enumerate(b64_list)]
+
+def load_mappings_from_paths(paths):
+    """Loads and merges mappings from a list of local file paths (CSV or Excel)."""
+    import pandas as pd
+    mappings = []
+    for p in paths:
+        p = p.strip().strip('"')
+        if not os.path.isfile(p): continue
+        try:
+            # Determine category from filename
+            cat = "Earnings"
+            fname = os.path.basename(p).lower()
+            if "deduction" in fname: cat = "Deductions"
+            elif "contribution" in fname: cat = "Contributions"
+            elif "tax" in fname: cat = "Taxes"
+            
+            df = pd.read_csv(p) if p.lower().endswith('.csv') else pd.read_excel(p)
+            
+            # Find Source and Uzio columns
+            s_col = next((c for c in df.columns if "source" in str(c).lower() and "name" in str(c).lower()), None)
+            u_col = next((c for c in df.columns if "uzio" in str(c).lower() and ("name" in str(c).lower() or "description" in str(c).lower())), None)
+            
+            if s_col and u_col:
+                for _, row in df.iterrows():
+                    mappings.append({
+                        "Category": cat,
+                        "Source_Name": str(row[s_col]).strip(),
+                        "UZIO_Name": str(row[u_col]).strip()
+                    })
+        except Exception as e:
+            print(f"Error loading mapping {p}: {e}")
+    return mappings
+
+# ── Tool Definitions ──────────────────────────────────────────────────────────
+
+PATH_DESC = "Full local file path (e.g. C:\\Users\\...\\file.xlsx). Preferred over base64 for large files."
+
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
     return [
+        # --- UTILITY TOOLS ---
+        types.Tool(
+            name="list_audit_files",
+            description=(
+                "Lists all files available in a specified directory or the default audit drop-folder. "
+                "Always call this first before running any audit to discover "
+                "which files the user has available. Returns file names, "
+                "full paths, sizes, and last-modified timestamps."
+            ),
+            inputSchema={
+                "type": "object", 
+                "properties": {
+                    "directory_path": {
+                        "type": "string",
+                        "description": "Optional: Full local path to a folder to scan (e.g., C:\\Users\\...\\Happy Delivery). Defaults to Desktop/Audit Files."
+                    }
+                }
+            },
+        ),
+
         # --- ADP TOOLS ---
         types.Tool(
             name="adp_total_comparison",
-            description="Performs a complete payroll total comparison between ADP and Uzio reports (Earnings, Deductions, Taxes, Contributions).",
+            description=(
+                "Performs a complete payroll total comparison between ADP and Uzio reports. "
+                "HINT: Always call 'list_audit_files' first to identify the correct paths."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "adp_files_base64": {"type": "array", "items": {"type": "string"}, "description": "Base64 encoded ADP payroll files"},
-                    "uzio_file_base64": {"type": "string", "description": "Base64 encoded Uzio payroll file"},
-                    "mappings_json": {"type": "string", "description": "JSON string of code mappings"}
+                    "adp_file_paths": {"type": "array", "items": {"type": "string"}, "description": PATH_DESC},
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "mapping_file_paths": {"type": "array", "items": {"type": "string"}, "description": "Local paths to mapping files (Earnings, Deductions, etc.)"},
+                    "mappings_json": {
+                        "type": "string", 
+                        "description": (
+                            "Optional: Flat JSON array of mapping objects. Use this if mapping files aren't available."
+                        )
+                    },
+                    "adp_files_base64": {"type": "array", "items": {"type": "string"}, "description": "Fallback: base64 encoded ADP files"},
+                    "uzio_file_base64": {"type": "string", "description": "Fallback: base64 encoded Uzio file"},
                 },
-                "required": ["adp_files_base64", "uzio_file_base64", "mappings_json"],
+                "required": [],
             },
         ),
         types.Tool(
@@ -54,10 +222,11 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "uzio_raw_base64": {"type": "string", "description": "Base64 encoded Uzio raw export"},
-                    "adp_raw_base64": {"type": "string", "description": "Base64 encoded ADP raw export"}
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "adp_file_path": {"type": "string", "description": PATH_DESC},
+                    "uzio_raw_base64": {"type": "string", "description": "Fallback: base64 Uzio file"},
+                    "adp_raw_base64": {"type": "string", "description": "Fallback: base64 ADP file"},
                 },
-                "required": ["uzio_raw_base64", "adp_raw_base64"],
             },
         ),
         types.Tool(
@@ -66,11 +235,13 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "adp_file_path": {"type": "string", "description": PATH_DESC},
+                    "mapping_json": {"type": "string", "description": "JSON mapping of deduction codes"},
                     "uzio_raw_base64": {"type": "string"},
                     "adp_raw_base64": {"type": "string"},
-                    "mapping_json": {"type": "string", "description": "JSON mapping of deduction codes"}
                 },
-                "required": ["uzio_raw_base64", "adp_raw_base64", "mapping_json"],
+                "required": ["mapping_json"],
             },
         ),
         types.Tool(
@@ -79,10 +250,11 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "adp_file_path": {"type": "string", "description": PATH_DESC},
                     "uzio_raw_base64": {"type": "string"},
-                    "adp_raw_base64": {"type": "string"}
+                    "adp_raw_base64": {"type": "string"},
                 },
-                "required": ["uzio_raw_base64", "adp_raw_base64"],
             },
         ),
         types.Tool(
@@ -91,43 +263,39 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "adp_file_path": {"type": "string", "description": PATH_DESC},
                     "uzio_raw_base64": {"type": "string"},
-                    "adp_raw_base64": {"type": "string"}
+                    "adp_raw_base64": {"type": "string"},
                 },
-                "required": ["uzio_raw_base64", "adp_raw_base64"],
             },
         ),
         types.Tool(
             name="adp_census_sanity",
-            description=(
-                "Applies opt-in auto-corrections to an ADP Census export and returns a base64 "
-                "Excel workbook with two sheets: 'Corrected Census' (cleaned data + a "
-                "CRITICAL_WARNINGS column) and 'Change Log' (per-row audit trail). All toggles "
-                "default OFF — pass true on the ones you want applied."
-            ),
+            description="Applies opt-in auto-corrections to an ADP Census export. Returns a cleaned Excel workbook.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "file_base64": {"type": "string", "description": "Base64-encoded ADP Census export (.xlsx or .csv)"},
-                    "filename": {"type": "string", "description": "Original filename (used to detect .csv vs .xlsx). Defaults to upload.xlsx."},
-                    "fix_flsa": {"type": "boolean", "description": "Enforce FLSA/Pay Type alignment — fill blank FLSA from Hourly/Salaried."},
-                    "fix_emails": {"type": "boolean", "description": "Use Personal Email as fallback when Work Email is blank."},
-                    "fix_job_title": {"type": "boolean", "description": "Auto-fill blank Job Titles using Department Description."},
-                    "fix_driver_smart": {"type": "boolean", "description": "Smart Driver Correction: if Dept/Job indicates Driver, fill Job/FLSA/Pay Type."},
-                    "fix_license": {"type": "boolean", "description": "Strict license validation — clear license dates if number is missing."},
-                    "fix_status": {"type": "boolean", "description": "Auto-map Employment Status (e.g. Inactive -> Terminated)."},
-                    "fix_type": {"type": "boolean", "description": "Auto-map Worker Category (e.g. Intern -> Part Time)."},
-                    "fix_dol_status": {"type": "boolean", "description": "Auto-fill blank DOL_Status to 'Full Time' for active employees."},
-                    "fix_leave_to_active": {"type": "boolean", "description": "Reclassify Position Status 'Leave' to 'Active' when Termination Date is blank."},
-                    "fix_blank_jt_to_driver": {"type": "boolean", "description": "Auto-fill blank Job Title to 'Driver' for Non-Exempt Hourly employees."},
-                    "fix_std_hours": {"type": "boolean", "description": "Auto-fill blank Standard Hours to '0'."},
-                    "rename_std_hours": {"type": "boolean", "description": "Rename 'Standard Hours' header to 'Working hours per Week'."},
-                    "fix_zip": {"type": "boolean", "description": "Auto-fix Zip Code (pad 4-digits and trim to 5-digits)."},
-                    "rename_zip_col": {"type": "boolean", "description": "Rename 'Primary Address: Zip / Postal Code' to 'Primary Address: Zip Code'."},
-                    "replace_gender_col": {"type": "boolean", "description": "Drop existing 'Gender / Sex (Self-ID)' column and rename 'Sex' to 'Gender / Sex (Self-ID)'."},
-                    "sort_by_manager": {"type": "boolean", "description": "Cluster managers and their reportees at the top of the output."},
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                    "file_base64": {"type": "string", "description": "Fallback: base64 encoded ADP Census export"},
+                    "filename": {"type": "string"},
+                    "fix_flsa": {"type": "boolean"},
+                    "fix_emails": {"type": "boolean"},
+                    "fix_job_title": {"type": "boolean"},
+                    "fix_driver_smart": {"type": "boolean"},
+                    "fix_license": {"type": "boolean"},
+                    "fix_status": {"type": "boolean"},
+                    "fix_type": {"type": "boolean"},
+                    "fix_dol_status": {"type": "boolean"},
+                    "fix_leave_to_active": {"type": "boolean"},
+                    "fix_blank_jt_to_driver": {"type": "boolean"},
+                    "fix_std_hours": {"type": "boolean"},
+                    "rename_std_hours": {"type": "boolean"},
+                    "fix_zip": {"type": "boolean"},
+                    "rename_zip_col": {"type": "boolean"},
+                    "replace_gender_col": {"type": "boolean"},
+                    "sort_by_manager": {"type": "boolean"},
                 },
-                "required": ["file_base64"],
             },
         ),
         types.Tool(
@@ -136,10 +304,11 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "adp_file_path": {"type": "string", "description": PATH_DESC},
                     "uzio_raw_base64": {"type": "string"},
-                    "adp_raw_base64": {"type": "string"}
+                    "adp_raw_base64": {"type": "string"},
                 },
-                "required": ["uzio_raw_base64", "adp_raw_base64"],
             },
         ),
         types.Tool(
@@ -148,10 +317,11 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "adp_file_path": {"type": "string", "description": PATH_DESC},
                     "uzio_raw_base64": {"type": "string"},
-                    "adp_raw_base64": {"type": "string"}
+                    "adp_raw_base64": {"type": "string"},
                 },
-                "required": ["uzio_raw_base64", "adp_raw_base64"],
             },
         ),
         types.Tool(
@@ -160,38 +330,65 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "adp_file_path": {"type": "string", "description": PATH_DESC},
                     "uzio_raw_base64": {"type": "string"},
-                    "adp_raw_base64": {"type": "string"}
+                    "adp_raw_base64": {"type": "string"},
                 },
-                "required": ["uzio_raw_base64", "adp_raw_base64"],
             },
         ),
 
         # --- PAYCOM TOOLS ---
         types.Tool(
             name="paycom_deduction_analyzer",
-            description="Analyzes Paycom deductions and consolidation plans. Identifies overlaps and provides merge reasoning.",
+            description="Analyzes Paycom deductions and consolidation plans.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "scheduled_report_base64": {"type": "string", "description": "Base64 encoded Paycom Scheduled Report"},
-                    "prior_payroll_base64": {"type": "string", "description": "Base64 encoded Prior Payroll report"},
-                    "config_file_base64": {"type": "string", "description": "Optional Base64 encoded config file"}
+                    "scheduled_report_path": {"type": "string", "description": PATH_DESC},
+                    "prior_payroll_path": {"type": "string", "description": PATH_DESC},
+                    "config_file_path": {"type": "string", "description": "Optional config file path"},
+                    "scheduled_report_base64": {"type": "string"},
+                    "prior_payroll_base64": {"type": "string"},
+                    "config_file_base64": {"type": "string"},
                 },
-                "required": ["scheduled_report_base64", "prior_payroll_base64"],
             },
         ),
         types.Tool(
             name="paycom_total_comparison",
-            description="Performs a complete payroll total comparison between Paycom and Uzio reports.",
+            description=(
+                "Performs a complete payroll total comparison between Paycom and Uzio reports. "
+                "HINT: Always call 'list_audit_files' first to identify the correct paths."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "paycom_file_paths": {"type": "array", "items": {"type": "string"}, "description": PATH_DESC},
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "mapping_file_paths": {"type": "array", "items": {"type": "string"}, "description": "Local paths to mapping files (Earnings, Deductions, etc.)"},
+                    "mappings_json": {
+                        "type": "string",
+                        "description": (
+                            "Optional: Flat JSON array of mapping objects. Use this if mapping files aren't available."
+                        )
+                    },
                     "paycom_files_base64": {"type": "array", "items": {"type": "string"}},
                     "uzio_file_base64": {"type": "string"},
-                    "mappings_json": {"type": "string"}
                 },
-                "required": ["paycom_files_base64", "uzio_file_base64", "mappings_json"],
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="paycom_census_audit",
+            description="Audits employee census data between Uzio and Paycom to find mismatches in names, emails, etc.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "paycom_file_path": {"type": "string", "description": PATH_DESC},
+                    "uzio_raw_base64": {"type": "string", "description": "Fallback: base64 Uzio file"},
+                    "paycom_raw_base64": {"type": "string", "description": "Fallback: base64 Paycom file"},
+                },
             },
         ),
         types.Tool(
@@ -200,9 +397,9 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "sql_file_base64": {"type": "string"}
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                    "sql_file_base64": {"type": "string"},
                 },
-                "required": ["sql_file_base64"],
             },
         ),
         types.Tool(
@@ -211,10 +408,11 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "paycom_file_path": {"type": "string", "description": PATH_DESC},
                     "uzio_raw_base64": {"type": "string"},
-                    "paycom_raw_base64": {"type": "string"}
+                    "paycom_raw_base64": {"type": "string"},
                 },
-                "required": ["uzio_raw_base64", "paycom_raw_base64"],
             },
         ),
         types.Tool(
@@ -223,10 +421,11 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "paycom_file_path": {"type": "string", "description": PATH_DESC},
                     "uzio_raw_base64": {"type": "string"},
-                    "paycom_raw_base64": {"type": "string"}
+                    "paycom_raw_base64": {"type": "string"},
                 },
-                "required": ["uzio_raw_base64", "paycom_raw_base64"],
             },
         ),
         types.Tool(
@@ -235,10 +434,11 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "paycom_file_path": {"type": "string", "description": PATH_DESC},
                     "uzio_raw_base64": {"type": "string"},
-                    "paycom_raw_base64": {"type": "string"}
+                    "paycom_raw_base64": {"type": "string"},
                 },
-                "required": ["uzio_raw_base64", "paycom_raw_base64"],
             },
         ),
         types.Tool(
@@ -247,86 +447,174 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "paycom_file_path": {"type": "string", "description": PATH_DESC},
+                    "mapping_file_path": {"type": "string"},
                     "uzio_raw_base64": {"type": "string"},
                     "paycom_raw_base64": {"type": "string"},
-                    "mapping_file_base64": {"type": "string"}
+                    "mapping_file_base64": {"type": "string"},
                 },
-                "required": ["uzio_raw_base64", "paycom_raw_base64"],
             },
         ),
         types.Tool(
             name="paycom_census_sanity",
-            description="Performs a sanity check on Paycom census files.",
+            description=(
+                "Applies opt-in auto-corrections to a Paycom Census export and writes a "
+                "cleaned Excel workbook (Corrected Census + Change Log sheets) to the user's "
+                "Desktop. All toggles default OFF — pass true on the ones you want applied. "
+                "Mirrors the Streamlit Paycom Sanity tool toggle set."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "file_base64": {"type": "string"}
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                    "file_base64": {"type": "string", "description": "Fallback: base64 encoded Paycom Census export"},
+                    "filename": {"type": "string"},
+                    "fix_flsa": {"type": "boolean", "description": "Enforce FLSA/Pay Type alignment — fill blank FLSA from Hourly/Salaried."},
+                    "fix_emails": {"type": "boolean", "description": "Use Personal Email as fallback when Work Email is blank."},
+                    "fix_driver_smart": {"type": "boolean", "description": "Smart Driver Correction: if Dept/Job indicates Driver, fill Job/FLSA/Pay Type."},
+                    "fix_license": {"type": "boolean", "description": "Strict license validation — clear license dates if number is missing."},
+                    "fix_status": {"type": "boolean", "description": "Auto-map Employment Status (e.g. Inactive -> Terminated)."},
+                    "fix_type": {"type": "boolean", "description": "Auto-map Worker Category (e.g. Intern -> Part Time)."},
+                    "fix_position": {"type": "boolean", "description": "Auto-Fill blank Position with Department Description."},
+                    "fix_dol_status": {"type": "boolean", "description": "Auto-fill blank DOL_Status to 'Full-Time' for active employees."},
+                    "fix_zip": {"type": "boolean", "description": "Auto-fix Zip Code (pad 4-digits and trim to 5-digits)."},
+                    "sort_by_manager": {"type": "boolean", "description": "Cluster managers and their reportees at the top of the output."},
                 },
-                "required": ["file_base64"],
             },
-        )
+        ),
+        types.Tool(
+            name="selective_employee_extractor",
+            description="Extracts specific employee records from a payroll/census file based on a list of IDs.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                    "employee_ids": {"type": "array", "items": {"type": "string"}, "description": "List of Employee IDs to extract"},
+                    "file_base64": {"type": "string", "description": "Fallback: base64 encoded file"},
+                },
+                "required": ["employee_ids"],
+            },
+        ),
+        types.Tool(
+            name="read_audit_report",
+            description=(
+                "Reads the contents of any Excel or CSV audit report from the Desktop or Audit Files folder. "
+                "Use this to analyze reports that were previously generated or to 'see' the data in a file."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                    "sheet_name": {"type": "string", "description": "Optional: Name of the sheet to read (defaults to first sheet)"},
+                },
+                "required": ["file_path"],
+            },
+        ),
     ]
+
+# ── Tool Handlers ─────────────────────────────────────────────────────────────
 
 @server.call_tool()
 async def handle_call_tool(name: str, arguments: dict | None):
-    # Helper to decode and prepare file data
-    def decode_file(b64, default_name="file.xlsx"):
-        return base64.b64decode(b64) if b64 else b""
-
+    arguments = arguments or {}
     try:
-        if name == "adp_total_comparison":
-            adp_data = [(decode_file(b64), f"adp_{i}.xlsx") for i, b64 in enumerate(arguments.get("adp_files_base64", []))]
-            uzio_data = (decode_file(arguments.get("uzio_file_base64")), "uzio.xlsx")
-            mappings = json.loads(arguments.get("mappings_json", "[]"))
+        if name == "list_audit_files":
+            files = []
+            scan_dir = arguments.get("directory_path", AUDIT_INBOX).strip().strip('"')
+            
+            if not os.path.isdir(scan_dir):
+                return [types.TextContent(type="text", text=f"Error: The directory '{scan_dir}' does not exist or is not a folder.")]
+
+            try:
+                from datetime import datetime
+                count = 0
+                for root, dirs, filenames in os.walk(scan_dir):
+                    for fname in sorted(filenames):
+                        if count > 500: break # Safety limit
+                        fpath = os.path.join(root, fname)
+                        try:
+                            stat = os.stat(fpath)
+                            files.append({
+                                "name": fname,
+                                "path": fpath,
+                                "size_kb": round(stat.st_size / 1024, 1),
+                                "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                            })
+                            count += 1
+                        except: continue
+                    if count > 500: break
+            except Exception as e:
+                return [types.TextContent(type="text", text=f"Error scanning directory: {str(e)}")]
+
+            result = {
+                "scanned_directory": scan_dir,
+                "file_count": len(files),
+                "files": files,
+                "note": "Limited to first 500 files for performance." if len(files) >= 500 else "All files listed.",
+                "instruction": "Use the 'path' field from these files as arguments in other tools.",
+            }
+            return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=_json_default))]
+
+        elif name == "adp_total_comparison":
+            adp_data = load_files_list(arguments, "adp_file_paths", "adp_files_base64")
+            uzio_data = (load_file(arguments, "uzio_file_path", "uzio_file_base64"), "uzio.xlsx")
+            
+            mapping_paths = arguments.get("mapping_file_paths", [])
+            if mapping_paths:
+                mappings = load_mappings_from_paths(mapping_paths)
+            else:
+                mappings_raw = arguments.get("mappings_json", "[]")
+                try:
+                    mappings = json.loads(mappings_raw)
+                    if isinstance(mappings, dict):
+                        # Flatten if passed as a dict of categories
+                        flattened = []
+                        for cat, items in mappings.items():
+                            if isinstance(items, list):
+                                for item in items:
+                                    if isinstance(item, dict):
+                                        item["Category"] = item.get("Category", cat)
+                                        flattened.append(item)
+                        mappings = flattened
+                except:
+                    return [types.TextContent(type="text", text="Error: mappings_json is not valid JSON.")]
+
             results = run_adp_total_comparison(adp_data, uzio_data, mappings)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            summary = save_results_to_excel(results, "ADP_Total_Comparison")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_census_audit":
-            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-            adp_content = decode_file(arguments.get("adp_raw_base64"))
-            results = run_adp_census_audit(uzio_content, adp_content)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            adp = load_file(arguments, "adp_file_path", "adp_raw_base64")
+            results = run_adp_census_audit(uzio, adp)
+            summary = save_results_to_excel(results, "ADP_Census_Audit")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_deduction_audit":
-            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-            adp_content = decode_file(arguments.get("adp_raw_base64"))
+            uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            adp = load_file(arguments, "adp_file_path", "adp_raw_base64")
             mapping = json.loads(arguments.get("mapping_json", "{}"))
-            results = run_adp_deduction_audit(uzio_content, adp_content, mapping)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
-
-        elif name == "paycom_deduction_analyzer":
-            sched = decode_file(arguments.get("scheduled_report_base64"))
-            prior = decode_file(arguments.get("prior_payroll_base64"))
-            config = decode_file(arguments.get("config_file_base64")) if "config_file_base64" in arguments else None
-            results = run_paycom_deduction_analysis(sched, prior, config)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
-
-        elif name == "paycom_total_comparison":
-            paycom_data = [(decode_file(b64), f"paycom_{i}.xlsx") for i, b64 in enumerate(arguments.get("paycom_files_base64", []))]
-            uzio_data = (decode_file(arguments.get("uzio_file_base64")), "uzio.xlsx")
-            mappings = json.loads(arguments.get("mappings_json", "[]"))
-            results = run_paycom_total_comparison(paycom_data, uzio_data, mappings)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
-
-        elif name == "paycom_sql_master":
-            content = decode_file(arguments.get("sql_file_base64"))
-            results = run_paycom_sql_master(content)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            results = run_adp_deduction_audit(uzio, adp, mapping)
+            summary = save_results_to_excel(results, "ADP_Deduction_Audit")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_payment_audit":
-            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-            adp_content = decode_file(arguments.get("adp_raw_base64"))
-            results = run_adp_payment_audit(uzio_content, adp_content)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            adp = load_file(arguments, "adp_file_path", "adp_raw_base64")
+            results = run_adp_payment_audit(uzio, adp)
+            summary = save_results_to_excel(results, "ADP_Payment_Audit")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_withholding_audit":
-            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-            adp_content = decode_file(arguments.get("adp_raw_base64"))
-            results = run_adp_withholding_audit(uzio_content, adp_content)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            adp = load_file(arguments, "adp_file_path", "adp_raw_base64")
+            results = run_adp_withholding_audit(uzio, adp)
+            summary = save_results_to_excel(results, "ADP_Withholding_Audit")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_census_sanity":
-            content = decode_file(arguments.get("file_base64"))
+            content = load_file(arguments, "file_path", "file_base64")
             filename = arguments.get("filename") or "upload.xlsx"
             toggle_keys = [
                 "fix_flsa", "fix_emails", "fix_job_title", "fix_driver_smart", "fix_license",
@@ -343,77 +631,193 @@ async def handle_call_tool(name: str, arguments: dict | None):
             )
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            # Save output to Desktop for easy access
+            out_path = os.path.join(os.path.expanduser("~"), "Desktop", f"ADP_Cleaned_{stamp}.xlsx")
+            with open(out_path, "wb") as f:
+                f.write(xlsx_bytes)
             payload = {
-                "filename": f"ADP_Cleaned_{stamp}.xlsx",
-                "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "file_base64": base64.b64encode(xlsx_bytes).decode("ascii"),
+                "output_file": out_path,
                 "summary": summary,
                 "applied_toggles": {k: v for k, v in fix_options.items() if v},
             }
-            return [types.TextContent(type="text", text=json.dumps(payload, indent=2))]
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
         elif name == "adp_emergency_audit":
-            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-            adp_content = decode_file(arguments.get("adp_raw_base64"))
-            results = run_adp_emergency_audit(uzio_content, adp_content)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            adp = load_file(arguments, "adp_file_path", "adp_raw_base64")
+            results = run_adp_emergency_audit(uzio, adp)
+            summary = save_results_to_excel(results, "ADP_Emergency_Audit")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_license_audit":
-            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-            adp_content = decode_file(arguments.get("adp_raw_base64"))
-            results = run_adp_license_audit(uzio_content, adp_content)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            adp = load_file(arguments, "adp_file_path", "adp_raw_base64")
+            results = run_adp_license_audit(uzio, adp)
+            summary = save_results_to_excel(results, "ADP_License_Audit")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_timeoff_audit":
-            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-            adp_content = decode_file(arguments.get("adp_raw_base64"))
-            results = run_adp_timeoff_audit(uzio_content, adp_content)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            adp = load_file(arguments, "adp_file_path", "adp_raw_base64")
+            results = run_adp_timeoff_audit(uzio, adp)
+            # Timeoff usually returns a message if it's a template update
+            if isinstance(results, dict) and "message" in results:
+                return [types.TextContent(type="text", text=json.dumps(results, indent=2, default=_json_default))]
+            summary = save_results_to_excel(results, "ADP_Timeoff_Audit")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
+
+        elif name == "paycom_deduction_analyzer":
+            sched = load_file(arguments, "scheduled_report_path", "scheduled_report_base64")
+            prior = load_file(arguments, "prior_payroll_path", "prior_payroll_base64")
+            config = load_file(arguments, "config_file_path", "config_file_base64") or None
+            results = run_paycom_deduction_analysis(sched, prior, config)
+            summary = save_results_to_excel(results, "Paycom_Deduction_Analysis")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
+
+        elif name == "paycom_total_comparison":
+            paycom_data = load_files_list(arguments, "paycom_file_paths", "paycom_files_base64")
+            uzio_data = (load_file(arguments, "uzio_file_path", "uzio_file_base64"), "uzio.xlsx")
+            
+            mapping_paths = arguments.get("mapping_file_paths", [])
+            if mapping_paths:
+                mappings = load_mappings_from_paths(mapping_paths)
+            else:
+                mappings_raw = arguments.get("mappings_json", "[]")
+                try:
+                    mappings = json.loads(mappings_raw)
+                    if isinstance(mappings, dict):
+                        # Flatten if passed as a dict of categories
+                        flattened = []
+                        for cat, items in mappings.items():
+                            if isinstance(items, list):
+                                for item in items:
+                                    if isinstance(item, dict):
+                                        item["Category"] = item.get("Category", cat)
+                                        flattened.append(item)
+                        mappings = flattened
+                except:
+                    return [types.TextContent(type="text", text="Error: mappings_json is not valid JSON.")]
+
+            results = run_paycom_total_comparison(paycom_data, uzio_data, mappings)
+            summary = save_results_to_excel(results, "Paycom_Total_Comparison")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
+
+        elif name == "paycom_census_audit":
+            uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            paycom = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
+            results = run_paycom_census_audit(uzio, paycom)
+            summary = save_results_to_excel(results, "Paycom_Census_Audit")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
+
+        elif name == "paycom_sql_master":
+            content = load_file(arguments, "file_path", "sql_file_base64")
+            results = run_paycom_sql_master(content)
+            summary = save_results_to_excel(results, "Paycom_SQL_Master")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_payment_audit":
-            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-            paycom_content = decode_file(arguments.get("paycom_raw_base64"))
-            results = run_paycom_payment_audit(uzio_content, paycom_content)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            paycom = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
+            results = run_paycom_payment_audit(uzio, paycom)
+            summary = save_results_to_excel(results, "Paycom_Payment_Audit")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_emergency_audit":
-            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-            paycom_content = decode_file(arguments.get("paycom_raw_base64"))
-            results = run_paycom_emergency_audit(uzio_content, paycom_content)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            paycom = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
+            results = run_paycom_emergency_audit(uzio, paycom)
+            summary = save_results_to_excel(results, "Paycom_Emergency_Audit")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_timeoff_audit":
-            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-            paycom_content = decode_file(arguments.get("paycom_raw_base64"))
-            results = run_paycom_timeoff_audit(uzio_content, paycom_content)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            paycom = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
+            results = run_paycom_timeoff_audit(uzio, paycom)
+            summary = save_results_to_excel(results, "Paycom_Timeoff_Audit")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_withholding_audit":
-            uzio_content = decode_file(arguments.get("uzio_raw_base64"))
-            paycom_content = decode_file(arguments.get("paycom_raw_base64"))
-            mapping = decode_file(arguments.get("mapping_file_base64")) if "mapping_file_base64" in arguments else None
-            results = run_paycom_withholding_audit(uzio_content, paycom_content, mapping)
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            paycom = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
+            mapping = load_file(arguments, "mapping_file_path", "mapping_file_base64") or None
+            results = run_paycom_withholding_audit(uzio, paycom, mapping)
+            summary = save_results_to_excel(results, "Paycom_Withholding_Audit")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_census_sanity":
-            content = decode_file(arguments.get("file_base64"))
+            content = load_file(arguments, "file_path", "file_base64")
+            filename = arguments.get("filename") or "upload.xlsx"
+            toggle_keys = [
+                "fix_flsa", "fix_emails", "fix_driver_smart", "fix_license",
+                "fix_status", "fix_type", "fix_position", "fix_dol_status", "fix_zip",
+            ]
+            fix_options = {k: bool(arguments.get(k, False)) for k in toggle_keys}
+            fix_options["fix_inactive"] = fix_options["fix_status"]
+            fix_options["fix_job_title"] = fix_options["fix_position"]
+            sort_by_manager = bool(arguments.get("sort_by_manager", False))
+            xlsx_bytes, summary = generate_corrected_census_xlsx(
+                content, PAYCOM_FIELD_MAP, fix_options=fix_options,
+                filename=filename, sort_by_manager=sort_by_manager,
+            )
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            out_path = os.path.join(os.path.expanduser("~"), "Desktop", f"Paycom_Cleaned_{stamp}.xlsx")
+            with open(out_path, "wb") as f:
+                f.write(xlsx_bytes)
+            payload = {
+                "output_file": out_path,
+                "summary": summary,
+                "applied_toggles": {k: v for k, v in fix_options.items() if v},
+            }
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
+        elif name == "selective_employee_extractor":
+            content = load_file(arguments, "file_path", "file_base64")
+            import pandas as pd, io
+            from utils.audit_utils import norm_id
+            
+            # Load file (try Excel then CSV)
+            try: df = pd.read_excel(io.BytesIO(content), dtype=str)
+            except: df = pd.read_csv(io.BytesIO(content), dtype=str)
+            
+            target_ids = [norm_id(eid) for eid in arguments.get("employee_ids", [])]
+            
+            # Find ID column (inlined normalization — no external dependency)
+            id_col = next((c for c in df.columns if any(k in str(c).strip().lower() for k in ["employee id", "employee code", "associate id", "ee code", "employee_code"])), df.columns[0])
+            
+            # Filter
+            filtered_df = df[df[id_col].apply(norm_id).isin(target_ids)]
+            
+            results = filtered_df.to_dict(orient="records")
+            summary = save_results_to_excel(results, "Selective_Extraction")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
+
+        elif name == "read_audit_report":
+            path = arguments.get("file_path", "").strip().strip('"')
+            sheet = arguments.get("sheet_name")
             import pandas as pd
-            import io
-            df = pd.read_excel(io.BytesIO(content), dtype=str)
-            results = run_census_sanity_check(df, PAYCOM_FIELD_MAP)
-            if hasattr(results, "to_dict"): results = results.to_dict(orient="records")
-            elif isinstance(results, dict) and "hard_errors" in results:
-                if hasattr(results["hard_errors"], "to_dict"):
-                    results["hard_errors"] = results["hard_errors"].to_dict(orient="records")
-            return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+            
+            # Load all sheets if no specific sheet requested
+            if not sheet:
+                xls = pd.ExcelFile(path)
+                result = {}
+                for s in xls.sheet_names:
+                    df = pd.read_excel(xls, sheet_name=s)
+                    result[s] = df.to_dict(orient="records")
+            else:
+                df = pd.read_excel(path, sheet_name=sheet) if path.lower().endswith(('.xlsx', '.xls')) else pd.read_csv(path)
+                result = df.to_dict(orient="records")
+                
+            return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=_json_default))]
 
         raise ValueError(f"Unknown tool: {name}")
+
     except Exception as e:
         import traceback
-        error_msg = f"Error executing tool '{name}': {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        return [types.TextContent(type="text", text=error_msg)]
+        return [types.TextContent(type="text", text=f"Error in '{name}': {e}\n\n{traceback.format_exc()}")]
 
-# ── SSE transport ──
+
+# ── SSE transport (for Vercel / HTTP) ────────────────────────────────────────
 sse = SseServerTransport("/messages")
 
 async def handle_sse(request):
@@ -434,3 +838,24 @@ mcp_app = Starlette(routes=[
     Route("/sse", endpoint=handle_sse),
     Mount("/messages", app=sse.handle_post_message),
 ])
+
+# ── Stdio transport (for local Claude Desktop) ────────────────────────────────
+import asyncio
+from mcp.server.stdio import stdio_server
+
+async def run_stdio():
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream, write_stream,
+            InitializationOptions(
+                server_name="audit-tool-server",
+                server_version="0.1.0",
+                capabilities=server.get_capabilities(
+                    notification_options=NotificationOptions(),
+                    experimental_capabilities={},
+                ),
+            ),
+        )
+
+if __name__ == "__main__":
+    asyncio.run(run_stdio())
