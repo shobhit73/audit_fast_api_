@@ -31,6 +31,8 @@ from core.census.sanity_check import run_census_sanity_check, generate_corrected
 from core.adp.misc_audits import (
     run_adp_emergency_audit, run_adp_license_audit, run_adp_timeoff_audit
 )
+from core.adp.census_generator import run_adp_census_generation
+from core.paycom.census_generator import run_paycom_census_generation
 
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
@@ -513,6 +515,67 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="adp_census_generator",
+            description=(
+                "Generates a Uzio Census Template (.xlsm) from an ADP Census export. "
+                "Reads ADP columns (e.g. 'Associate ID', 'Legal First Name', "
+                "'FLSA Description'), maps them to the Uzio template's expected headers, "
+                "applies the same auto-correction toggles as the Streamlit "
+                "'ADP - Full Census Generation' tool, and writes the output as a .xlsm to "
+                "the Audit Files inbox.\n\n"
+                "WORKFLOW: copy the ADP file with copy_to_audit_inbox first, then pass the "
+                "resulting path as 'file_path'. The output preserves the Uzio template's "
+                "VBA macros, instructions, and all non-data sheets."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                    "file_base64": {"type": "string", "description": "Fallback: base64-encoded ADP Census export (use only if path unavailable)."},
+                    "filename": {"type": "string", "description": "Optional filename hint, used when file_base64 is provided so the loader can pick the right reader (.xlsx vs .csv)."},
+                    "fix_flsa": {"type": "boolean", "description": "Enforce FLSA/Pay Type alignment (Hourly→Non-Exempt, Salaried→Exempt; blank→Non-Exempt)."},
+                    "fix_emails": {"type": "boolean", "description": "Use Personal Email when Work Email is blank."},
+                    "fix_status": {"type": "boolean", "description": "Map Position Status to ACTIVE / TERMINATED / EXCLUDE; 'not hired' rows are dropped."},
+                    "fix_inactive": {"type": "boolean", "description": "Map 'Inactive' to TERMINATED only when a Termination Date exists, else ACTIVE."},
+                    "fix_type": {"type": "boolean", "description": "Map Worker Category to Full Time / Part Time / Seasonal / Other."},
+                    "fix_zip": {"type": "boolean", "description": "Pad 4-digit zips and trim to 5 digits."},
+                    "fix_license": {"type": "boolean", "description": "Clear license expiration when license number is missing or 00/00/0000."},
+                    "fix_dol_status": {"type": "boolean", "description": "Default blank Employment Type to 'Full Time'."},
+                },
+            },
+        ),
+        types.Tool(
+            name="paycom_census_generator",
+            description=(
+                "Generates a Uzio Census Template (.xlsm) from a Paycom Census export. "
+                "Reads Paycom columns (e.g. 'Employee_Code', 'Legal_Firstname', "
+                "'Exempt_Status'), maps them to the Uzio template's expected headers, "
+                "applies the same auto-correction toggles as the Streamlit "
+                "'Paycom - Full Census Generation' tool, and writes the output as a "
+                ".xlsm to the Audit Files inbox.\n\n"
+                "WORKFLOW: copy the Paycom file with copy_to_audit_inbox first, then "
+                "pass the resulting path as 'file_path'. The output preserves the Uzio "
+                "template's VBA macros, instructions, and all non-data sheets."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                    "file_base64": {"type": "string", "description": "Fallback: base64-encoded Paycom Census export (use only if path unavailable)."},
+                    "filename": {"type": "string", "description": "Optional filename hint, used when file_base64 is provided."},
+                    "fix_flsa": {"type": "boolean", "description": "Enforce FLSA/Pay Type alignment."},
+                    "fix_emails": {"type": "boolean", "description": "Use Personal_Email when Work_Email is blank."},
+                    "fix_status": {"type": "boolean", "description": "Map Employee_Status to ACTIVE / TERMINATED / EXCLUDE."},
+                    "fix_inactive": {"type": "boolean", "description": "Map 'Inactive' to TERMINATED only when a Termination_Date exists, else ACTIVE."},
+                    "fix_type": {"type": "boolean", "description": "Map DOL_Status to Full Time / Part Time / Seasonal / Other."},
+                    "fix_position": {"type": "boolean", "description": "Auto-fill blank Job Title (Position) from Department_Desc."},
+                    "fix_dol_status": {"type": "boolean", "description": "Default blank DOL_Status (Employment Type) to 'Full Time'."},
+                    "fix_zip": {"type": "boolean", "description": "Pad 4-digit zips and trim to 5 digits."},
+                    "fix_license": {"type": "boolean", "description": "Clear license expiration when DriversLicense is missing or 00/00/0000."},
+                },
+            },
+        ),
+        types.Tool(
             name="adp_emergency_audit",
             description="Audits emergency contact information between Uzio and ADP.",
             inputSchema={
@@ -878,6 +941,58 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 "output_file": out_path,
                 "summary": summary,
                 "applied_toggles": {k: v for k, v in fix_options.items() if v},
+            }
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
+        elif name == "adp_census_generator":
+            content = load_file(arguments, "file_path", "file_base64")
+            filename = arguments.get("filename") or os.path.basename(
+                (arguments.get("file_path") or "adp_census.xlsx").strip().strip('"')
+            )
+            toggle_keys = [
+                "fix_flsa", "fix_emails", "fix_status", "fix_inactive",
+                "fix_type", "fix_zip", "fix_license", "fix_dol_status",
+            ]
+            fix_options = {k: bool(arguments.get(k, False)) for k in toggle_keys}
+            xlsm_bytes, summary = run_adp_census_generation(content, filename, fix_options=fix_options)
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            out_path = os.path.join(AUDIT_INBOX, f"ADP_Uzio_Census_{stamp}.xlsm")
+            if not os.path.exists(AUDIT_INBOX):
+                os.makedirs(AUDIT_INBOX, exist_ok=True)
+            with open(out_path, "wb") as f:
+                f.write(xlsm_bytes)
+            payload = {
+                "output_file": out_path,
+                "summary": summary,
+                "applied_toggles": {k: v for k, v in fix_options.items() if v},
+                "message": f"Uzio Census Template written to {out_path}",
+            }
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
+        elif name == "paycom_census_generator":
+            content = load_file(arguments, "file_path", "file_base64")
+            filename = arguments.get("filename") or os.path.basename(
+                (arguments.get("file_path") or "paycom_census.xlsx").strip().strip('"')
+            )
+            toggle_keys = [
+                "fix_flsa", "fix_emails", "fix_status", "fix_inactive",
+                "fix_type", "fix_position", "fix_dol_status", "fix_zip", "fix_license",
+            ]
+            fix_options = {k: bool(arguments.get(k, False)) for k in toggle_keys}
+            xlsm_bytes, summary = run_paycom_census_generation(content, filename, fix_options=fix_options)
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            out_path = os.path.join(AUDIT_INBOX, f"Paycom_Uzio_Census_{stamp}.xlsm")
+            if not os.path.exists(AUDIT_INBOX):
+                os.makedirs(AUDIT_INBOX, exist_ok=True)
+            with open(out_path, "wb") as f:
+                f.write(xlsm_bytes)
+            payload = {
+                "output_file": out_path,
+                "summary": summary,
+                "applied_toggles": {k: v for k, v in fix_options.items() if v},
+                "message": f"Uzio Census Template written to {out_path}",
             }
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
