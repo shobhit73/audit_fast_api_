@@ -62,37 +62,84 @@ def clean_money_val(x):
     try: return float(s)
     except: return 0.0
 
-def smart_read_df(content, filename="", sheet_name=None, header='infer', **kwargs):
+def smart_read_df(content, filename="", sheet_name=None, header='infer', required_columns=None, fallback_columns=None, **kwargs):
     """
     Robustly reads Excel or CSV from bytes. 
     If sheet_name is provided and it's an Excel file, it reads that sheet.
+    If required_columns is provided, it scans for the header row.
     Falls back to CSV if Excel reading fails or if the extension is .csv.
     """
     import io
     file_io = io.BytesIO(content)
     is_csv = str(filename).lower().endswith('.csv')
     
-    if is_csv:
+    if not is_csv:
+        # Try Excel
         try:
-            file_io.seek(0)
-            return pd.read_csv(file_io, header=header, **kwargs)
+            xls = pd.ExcelFile(file_io)
+            # Use provided sheet or search all sheets
+            sheets = [sheet_name] if sheet_name and sheet_name in xls.sheet_names else xls.sheet_names
+            
+            for sheet in sheets:
+                if required_columns:
+                    df_peek = pd.read_excel(xls, sheet_name=sheet, header=None, nrows=50)
+                    header_row_idx = None
+                    for idx, row in df_peek.iterrows():
+                        row_vals = [str(v).strip().lower() for v in row.values if pd.notna(v)]
+                        if all(any(col.lower() in v for v in row_vals) for col in required_columns):
+                            header_row_idx = idx
+                            break
+                    
+                    if header_row_idx is not None:
+                        return pd.read_excel(xls, sheet_name=sheet, header=header_row_idx, **kwargs)
+                    
+                    # Try fallback columns
+                    if fallback_columns:
+                        for idx, row in df_peek.iterrows():
+                            row_vals = [str(v).strip().lower() for v in row.values if pd.notna(v)]
+                            if all(any(col.lower() in v for v in row_vals) for col in fallback_columns):
+                                return pd.read_excel(xls, sheet_name=sheet, header=idx, **kwargs)
+                else:
+                    return pd.read_excel(xls, sheet_name=sheet, header=header, **kwargs)
         except Exception:
             pass
 
-    # Try Excel
+    # Try CSV
     try:
         file_io.seek(0)
-        if sheet_name:
-            return pd.read_excel(file_io, sheet_name=sheet_name, header=header, **kwargs)
-        else:
-            return pd.read_excel(file_io, header=header, **kwargs)
+        if required_columns:
+            # We need to peek to find the header
+            wrapper = io.TextIOWrapper(file_io, encoding='utf-8', errors='replace')
+            header_row_idx = None
+            for i, line in enumerate(wrapper):
+                line_lower = line.lower()
+                if all(col.lower() in line_lower for col in required_columns):
+                    header_row_idx = i
+                    break
+                if i > 100: break
+            
+            if header_row_idx is not None:
+                file_io.seek(0)
+                return pd.read_csv(file_io, header=header_row_idx, **kwargs)
+            
+            if fallback_columns:
+                file_io.seek(0)
+                wrapper = io.TextIOWrapper(file_io, encoding='utf-8', errors='replace')
+                for i, line in enumerate(wrapper):
+                    line_lower = line.lower()
+                    if all(col.lower() in line_lower for col in fallback_columns):
+                        header_row_idx = i
+                        break
+                    if i > 100: break
+                if header_row_idx is not None:
+                    file_io.seek(0)
+                    return pd.read_csv(file_io, header=header_row_idx, **kwargs)
+
+        file_io.seek(0)
+        return pd.read_csv(file_io, header=header, **kwargs)
     except Exception:
-        # Fallback to CSV if not already tried or if Excel failed
-        try:
-            file_io.seek(0)
-            return pd.read_csv(file_io, header=header, **kwargs)
-        except Exception:
-            return pd.DataFrame()
+        return pd.DataFrame()
+
 
 def norm_colname(c: str) -> str:
     if c is None: return ""
