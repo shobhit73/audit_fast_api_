@@ -1,7 +1,7 @@
 import pandas as pd
 import io
 import re
-from utils.audit_utils import clean_money_val, norm_colname, normalize_id, format_pay_date
+from utils.audit_utils import clean_money_val, norm_colname, normalize_id, format_pay_date, smart_read_df
 
 def parse_paycom_filename_date(filename):
     match = re.findall(r'(\d{8})', str(filename))
@@ -12,50 +12,43 @@ def parse_paycom_filename_date(filename):
 
 def find_header_and_data_uzio(file_content):
     """Find the data row in a Uzio export file (bytes)."""
+    # Try finding the right sheet first if it's Excel
     try:
+        import io
         xls = pd.ExcelFile(io.BytesIO(file_content))
         target_sheet = xls.sheet_names[0]
         if len(xls.sheet_names) > 1 and "criteria" in xls.sheet_names[0].lower():
             target_sheet = xls.sheet_names[1]
         df_peek = pd.read_excel(xls, sheet_name=target_sheet, header=None, nrows=50)
-        header_idx = 0
-        for i, row in df_peek.iterrows():
-            row_str = " ".join([str(x).lower() for x in row if pd.notna(x)])
-            if "employee id" in row_str or "employee name" in row_str:
-                header_idx = i; break
-        df = pd.read_excel(xls, sheet_name=target_sheet, header=header_idx)
-        header_top = df_peek.iloc[header_idx - 1].tolist() if header_idx > 0 else None
-        return df, header_top
     except Exception:
-        df = pd.read_csv(io.BytesIO(file_content), header=None, nrows=50)
-        header_idx = 0
-        for i, row in df.iterrows():
-            row_str = " ".join([str(x).lower() for x in row if pd.notna(x)])
-            if "employee id" in row_str or "employee name" in row_str:
-                header_idx = i; break
-        df = pd.read_csv(io.BytesIO(file_content), header=header_idx)
-        return df, None
+        # Fallback to direct read (CSV or simple Excel)
+        df_peek = smart_read_df(file_content, header=None, nrows=50)
+        target_sheet = None
+
+    header_idx = 0
+    for i, row in df_peek.iterrows():
+        row_str = " ".join([str(x).lower() for x in row if pd.notna(x)])
+        if "employee id" in row_str or "employee name" in row_str:
+            header_idx = i; break
+
+    if target_sheet:
+        df = pd.read_excel(io.BytesIO(file_content), sheet_name=target_sheet, header=header_idx)
+    else:
+        df = smart_read_df(file_content, header=header_idx)
+    
+    header_top = df_peek.iloc[header_idx - 1].tolist() if header_idx > 0 else None
+    return df, header_top
 
 def find_header_and_data_paycom(file_content, filename):
     """Find the data row in a Paycom export file (bytes)."""
-    fname = str(filename).lower()
-    if fname.endswith('.csv'):
-        df_peek = pd.read_csv(io.BytesIO(file_content), header=None, nrows=20)
-        header_idx = 0
-        for i, row in df_peek.iterrows():
-            row_str = " ".join([str(x).lower() for x in row if pd.notna(x)])
-            if any(kw in row_str for kw in ["ee code", "description", "earning", "amount", "row labels"]):
-                header_idx = i; break
-        return pd.read_csv(io.BytesIO(file_content), header=header_idx), None
-    
-    xls = pd.ExcelFile(io.BytesIO(file_content))
-    df_peek = pd.read_excel(xls, sheet_name=xls.sheet_names[0], header=None, nrows=10)
+    df_peek = smart_read_df(file_content, filename=filename, header=None, nrows=20)
     header_idx = 0
     for i, row in df_peek.iterrows():
         row_str = " ".join([str(x).lower() for x in row if pd.notna(x)])
         if any(kw in row_str for kw in ["ee code", "description", "earning", "amount", "row labels"]):
             header_idx = i; break
-    return pd.read_excel(xls, sheet_name=xls.sheet_names[0], header=header_idx), None
+    
+    return smart_read_df(file_content, filename=filename, header=header_idx), None
 
 def calculate_totals_uzio(df, header_top, column_names):
     """Sum up values for Uzio columns (wide format)."""

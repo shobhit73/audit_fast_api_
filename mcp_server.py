@@ -19,6 +19,7 @@ from core.adp.payment_audit import run_adp_payment_audit
 from core.adp.withholding_audit import run_adp_withholding_audit
 
 from core.paycom.deduction_analyzer import run_paycom_deduction_analysis
+from core.paycom.deduction_audit import run_paycom_deduction_audit
 from core.paycom.total_comparison import run_paycom_total_comparison
 from core.paycom.census_audit import run_paycom_census_audit, PAYCOM_FIELD_MAP
 from core.paycom.withholding_audit import run_paycom_withholding_audit
@@ -592,6 +593,21 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="paycom_deduction_audit",
+            description="Compares deduction amounts between Uzio and Paycom reports.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC},
+                    "paycom_file_path": {"type": "string", "description": PATH_DESC},
+                    "mapping_json": {"type": "string", "description": "JSON mapping of Paycom Deduction Description -> Uzio Deduction Name"},
+                    "uzio_raw_base64": {"type": "string"},
+                    "paycom_raw_base64": {"type": "string"},
+                },
+                "required": ["mapping_json"],
+            },
+        ),
+        types.Tool(
             name="paycom_census_audit",
             description="Audits employee census data between Uzio and Paycom to find mismatches in names, emails, etc.",
             inputSchema={
@@ -923,6 +939,14 @@ async def handle_call_tool(name: str, arguments: dict | None):
 
             results = run_paycom_total_comparison(paycom_data, uzio_data, mappings)
             summary = save_results_to_excel(results, "Paycom_Total_Comparison")
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
+
+        elif name == "paycom_deduction_audit":
+            uzio_data = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            paycom_data = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
+            mapping = json.loads(arguments.get("mapping_json", "{}"))
+            results = run_paycom_deduction_audit(uzio_data, paycom_data, mapping)
+            summary = save_results_to_excel(results, "Paycom_Deduction_Audit")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_census_audit":

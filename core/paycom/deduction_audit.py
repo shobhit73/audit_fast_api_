@@ -1,13 +1,12 @@
 import pandas as pd
 import io
 import re
-from utils.audit_utils import clean_money_val, norm_id, normalize_space_and_case
+from utils.audit_utils import clean_money_val, norm_id, normalize_space_and_case, smart_read_df
 
 def run_paycom_deduction_audit(uzio_content, paycom_content, mapping):
     """Production-grade Paycom deduction audit logic."""
-    df_uzio = pd.read_excel(io.BytesIO(uzio_content), dtype=str)
-    try: df_paycom = pd.read_csv(io.BytesIO(paycom_content))
-    except: df_paycom = pd.read_excel(io.BytesIO(paycom_content))
+    df_uzio = smart_read_df(uzio_content, dtype=str)
+    df_paycom = smart_read_df(paycom_content)
     
     p_id_col = next((c for c in df_paycom.columns if any(x in c.lower() for x in ["ee code", "employee code"])), "EE Code")
     p_desc_col = next((c for c in df_paycom.columns if "description" in c.lower()), "Description")

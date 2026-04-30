@@ -1,7 +1,7 @@
 import pandas as pd
 import io
 import re
-from utils.audit_utils import norm_blank, try_parse_date, norm_id, normalize_space_and_case
+from utils.audit_utils import norm_blank, try_parse_date, norm_id, normalize_space_and_case, smart_read_df
 
 def _pivot_uzio_long_to_wide(df_long):
     uz = df_long.copy()
@@ -10,11 +10,11 @@ def _pivot_uzio_long_to_wide(df_long):
 
 def run_paycom_withholding_audit(uzio_content, paycom_content, mapping_content):
     """Production-grade Paycom withholding audit logic."""
-    uzio_long = pd.read_csv(io.BytesIO(uzio_content), dtype=str).fillna("")
+    uzio_long = smart_read_df(uzio_content, dtype=str).fillna("")
     uzio_wide = _pivot_uzio_long_to_wide(uzio_long)
     
-    paycom = pd.read_csv(io.BytesIO(paycom_content), dtype=str).fillna("")
-    mapping = pd.read_excel(io.BytesIO(mapping_content), dtype=str)
+    paycom = smart_read_df(paycom_content, dtype=str).fillna("")
+    mapping = smart_read_df(mapping_content, dtype=str)
     
     p_id_col = next((c for c in paycom.columns if "Employee_Code" in c or "EE Code" in c), paycom.columns[0])
     paycom[p_id_col] = paycom[p_id_col].apply(norm_id)

@@ -62,15 +62,36 @@ def clean_money_val(x):
     try: return float(s)
     except: return 0.0
 
-def smart_read_df(content, **kwargs):
-    """Attempts to read content as Excel, falls back to CSV if it fails."""
-    try:
-        return pd.read_excel(io.BytesIO(content), **kwargs)
-    except (ValueError, Exception):
+def smart_read_df(content, filename="", sheet_name=None, header='infer', **kwargs):
+    """
+    Robustly reads Excel or CSV from bytes. 
+    If sheet_name is provided and it's an Excel file, it reads that sheet.
+    Falls back to CSV if Excel reading fails or if the extension is .csv.
+    """
+    import io
+    file_io = io.BytesIO(content)
+    is_csv = str(filename).lower().endswith('.csv')
+    
+    if is_csv:
         try:
-            return pd.read_csv(io.BytesIO(content), **kwargs)
-        except:
-            # Last resort: empty df with columns from kwargs if possible
+            file_io.seek(0)
+            return pd.read_csv(file_io, header=header, **kwargs)
+        except Exception:
+            pass
+
+    # Try Excel
+    try:
+        file_io.seek(0)
+        if sheet_name:
+            return pd.read_excel(file_io, sheet_name=sheet_name, header=header, **kwargs)
+        else:
+            return pd.read_excel(file_io, header=header, **kwargs)
+    except Exception:
+        # Fallback to CSV if not already tried or if Excel failed
+        try:
+            file_io.seek(0)
+            return pd.read_csv(file_io, header=header, **kwargs)
+        except Exception:
             return pd.DataFrame()
 
 def norm_colname(c: str) -> str:
@@ -156,18 +177,30 @@ def find_header_and_data(file_content, filename):
     return df, header_top, filename
 
 def read_uzio_raw_file(content):
+    """Reads Uzio raw census file, supporting both Excel (with sheet logic) and CSV."""
     try:
-        df = pd.read_excel(io.BytesIO(content), sheet_name='Employee Details', header=3)
+        # Try Excel with specific sheet and header row
+        df = smart_read_df(content, sheet_name='Employee Details', header=3)
+        if df.empty:
+            # Try CSV fallback (no sheet name)
+            df = smart_read_df(content, header=3)
+            
+        if df.empty:
+            # Try without header skip if still empty
+            df = smart_read_df(content)
+
         df.columns = [str(c).strip() for c in df.columns]
         norm_mapping = {norm_colname(k).casefold(): v for k, v in UZIO_RAW_MAPPING.items()}
         df.columns = [norm_mapping.get(norm_colname(c).casefold(), c) for c in df.columns]
+        
         if 'Employee ID' in df.columns:
             df['Employee ID'] = df['Employee ID'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+            
         return df
     except Exception as e:
         import sys
         sys.stderr.write(f"Error reading Uzio Raw File: {e}\n")
-        return pd.DataFrame() # Return empty DF instead of None
+        return pd.DataFrame()
 
 def is_hourly_only_job_title(jt_val: str) -> bool:
     jt = jt_val.strip().lower()

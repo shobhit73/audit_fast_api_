@@ -1,6 +1,5 @@
-import pandas as pd
-import io
 import re
+from utils.audit_utils import smart_read_df
 
 STATUS_MATCH = "Data Match"
 STATUS_MISMATCH = "Data Mismatch"
@@ -59,11 +58,10 @@ def run_paycom_payment_audit(uzio_content, paycom_content):
     Full production-grade Paycom payment audit.
     Matches 3 sheets: Summary, Field_Summary_By_Status, Comparison_Detail_AllFields
     """
-    df_uzio = pd.read_excel(io.BytesIO(uzio_content), header=1, dtype=str)
+    df_uzio = smart_read_df(uzio_content, header=1, dtype=str)
     df_uzio.columns = [str(c).strip() for c in df_uzio.columns]
 
-    try: df_paycom = pd.read_excel(io.BytesIO(paycom_content), dtype=str)
-    except: df_paycom = pd.read_csv(io.BytesIO(paycom_content), dtype=str)
+    df_paycom = smart_read_df(paycom_content, dtype=str)
     df_paycom.columns = [str(c).strip() for c in df_paycom.columns]
 
     # --- Build Uzio map ---

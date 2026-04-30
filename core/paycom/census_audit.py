@@ -125,8 +125,7 @@ def normalized_compare(field_name: str, uzio_val, paycom_val) -> bool:
 def run_paycom_census_audit(uzio_content, paycom_content):
     """Full production-grade Paycom census audit logic with 10-sheet output."""
     uzio = read_uzio_raw_file(uzio_content)
-    try: paycom = pd.read_excel(io.BytesIO(paycom_content), dtype=str)
-    except: paycom = pd.read_csv(io.BytesIO(paycom_content), dtype=str)
+    paycom = smart_read_df(paycom_content, dtype=str)
     
     uzio = ensure_unique_columns(uzio)
     uzio.columns = [norm_colname(c) for c in uzio.columns]
