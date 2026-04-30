@@ -201,9 +201,13 @@ def apply_data_corrections(file_path, corrections_list):
     
     try:
         wb = openpyxl.load_workbook(file_path)
-        # Use first sheet if not specified (could be enhanced later)
-        ws = wb.active
-        
+        # Prefer the sanity-output data sheet when present; fall back to whatever
+        # was active when the file was last saved.
+        if "Corrected Census" in wb.sheetnames:
+            ws = wb["Corrected Census"]
+        else:
+            ws = wb.active
+
         # 1. Identify header row (some files have junk rows at the top)
         header_row_idx = 1
         id_keywords = ["employee id", "employee code", "associate id", "file #", "id#"]
@@ -232,11 +236,22 @@ def apply_data_corrections(file_path, corrections_list):
             target_col = norm_colname(corr.get('column')).lower()
             new_val = corr.get('value')
             
-            # Find target column index
-            col_idx = next((i for i, h in enumerate(norm_headers) if target_col in h), None)
-            if col_idx is None:
+            # Find target column - error on ambiguity rather than silently
+            # picking the first match (e.g. "FLSA" matches both "FLSA Description"
+            # and "FLSA Code").
+            matches = [(i, headers[i]) for i, h in enumerate(norm_headers) if target_col in h]
+            if not matches:
                 results.append({"id": target_id, "status": "Error", "message": f"Column '{corr.get('column')}' not found."})
                 continue
+            if len(matches) > 1:
+                cand_names = [m[1] for m in matches]
+                results.append({
+                    "id": target_id,
+                    "status": "Error",
+                    "message": f"Column '{corr.get('column')}' is ambiguous; matches multiple headers: {cand_names}. Use the full header name."
+                })
+                continue
+            col_idx = matches[0][0]
             
             # 2. Find row and update
             found = False
@@ -313,32 +328,75 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="apply_data_corrections",
             description=(
-                "Performs surgical row-level updates to an Excel file using an Employee ID. "
-                "Preserves all original formatting (colors, fonts, borders). "
-                "Use this for 'Implementer Overrides' after a sanity check."
+                "Performs surgical row-level overrides on a post-sanity census file, "
+                "keyed off Employee ID (Paycom) or Associate ID (ADP). Preserves all "
+                "original Excel formatting (colors, fonts, borders, column widths). "
+                "Output: a NEW file '<base>_OVERRIDDEN_<timestamp>.xlsx' next to the "
+                "input - the input is never modified in place.\n\n"
+                "WORKFLOW (file_path resolution, in priority order):\n"
+                "  1. If the prior turn ran 'adp_census_sanity' or "
+                "'paycom_census_sanity', use the 'output_file' path returned in that "
+                "response - that is the canonical post-sanity file.\n"
+                "  2. Otherwise, call 'list_audit_files' and pick the most recent "
+                "'<Vendor>_Cleaned_*.xlsx' (vendor = ADP or Paycom) by filename "
+                "timestamp from the Audit Files inbox "
+                "(C:\\Users\\<user>\\Desktop\\Audit Files).\n"
+                "  3. Only ask the user if multiple vendors have recent cleaned files "
+                "and the override list itself does not disambiguate.\n\n"
+                "COLUMN-NAME RULE: Use the FULL header from the file (e.g. "
+                "'FLSA Description', not 'FLSA'). Matching is substring-based, so "
+                "ambiguous fragments will now error out listing all candidate headers "
+                "rather than silently picking the first one."
             ),
             inputSchema={
-                "type": "object", 
+                "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Full local path to the Excel file to modify."
+                        "description": (
+                            "Full local path to the post-sanity Excel file. Typically "
+                            "the 'output_file' returned by adp_census_sanity / "
+                            "paycom_census_sanity, or the most recent "
+                            "<Vendor>_Cleaned_*.xlsx in the Audit Files inbox."
+                        ),
                     },
                     "corrections": {
                         "type": "array",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "id": {"type": "string", "description": "Mandatory Employee ID"},
-                                "column": {"type": "string", "description": "Exact or normalized column name to update"},
-                                "value": {"type": "string", "description": "New value to write into the cell"}
+                                "id": {
+                                    "type": "string",
+                                    "description": (
+                                        "Employee ID (Paycom) or Associate ID (ADP). "
+                                        "Leading zeros and trailing '.0' are normalized "
+                                        "automatically."
+                                    ),
+                                },
+                                "column": {
+                                    "type": "string",
+                                    "description": (
+                                        "Full column header as it appears in the file's "
+                                        "header row (e.g. 'FLSA Description', "
+                                        "'Primary Address: Zip / Postal Code'). Partial "
+                                        "names like 'FLSA' will error if they match "
+                                        "multiple columns."
+                                    ),
+                                },
+                                "value": {
+                                    "type": "string",
+                                    "description": "New value to write into the cell.",
+                                },
                             },
-                            "required": ["id", "column", "value"]
+                            "required": ["id", "column", "value"],
                         },
-                        "description": "List of specific corrections to apply."
-                    }
+                        "description": (
+                            "List of row-level overrides to apply. Each item targets "
+                            "one cell, identified by (id, column)."
+                        ),
+                    },
                 },
-                "required": ["file_path", "corrections"]
+                "required": ["file_path", "corrections"],
             },
         ),
 
