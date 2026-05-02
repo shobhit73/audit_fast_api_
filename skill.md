@@ -1,4 +1,4 @@
-# Claude Desktop - Multi-Agent Payroll Migration SOP (v1.3)
+# Claude Desktop - Multi-Agent Payroll Migration SOP (v1.4)
 Before starting any audit or analysis, you **must** verify the data location.
 1.  **Check Location**: If the files are in `Downloads` or a client folder, you **must** use the `copy_to_audit_inbox` tool to move them to `C:\Users\shobhit.sharma\Desktop\Audit Files`.
 2.  **Verify Size**: If the file is >1MB, **never** use base64 fallback. Always use `file_path`.
@@ -67,3 +67,51 @@ If the user mentions a specific client (e.g., "Happy Delivery"):
 ## 7. Reporting & Communication
 *   **Action**: Summarize all corrections made and the final status of problematic records.
 *   **Verification**: All tool output reports are **MANDATORY** saved to the `Audit Files` folder on the Desktop. Use `list_audit_files` to verify the filename and then `read_audit_report` for analysis.
+
+## 8. Prior Payroll Workflows (v1.4)
+
+### 8.1 Prior Payroll Sanity Check (ADP)
+**Trigger**: Implementer uploads an ADP `Prior Payroll Register Report_*.xlsx` that has interleaved `Totals For Associate ID XYZ:` summary rows, a bottom-of-file grand-total row, or multiple per-pay-period rows per employee.
+1.  **Tool**: `adp_prior_payroll_sanity`
+2.  **Inputs**:
+    *   `file_path` (preferred) or `file_b64`
+    *   `swap_net_take` (default `True`) — flips NET PAY ⇄ TAKE HOME values for the Carvan-style API. Headers are NEVER renamed.
+    *   `aggregation_strategy`:
+        *   `"full_quarter"` (default) — collapses everything to one row per associate.
+        *   `"preserve_pay_periods"` — keeps distinct pay periods, only merges same-day duplicate row pairs.
+3.  **Output**: Cleaned CSV in the `Audit Files` folder + summary dict (rows dropped, associates aggregated, merge events).
+4.  **CRITICAL**: ADP money cells are `=ROUND(x, 2.0)` Excel formulas — this tool reads them with `openpyxl` and evaluates the formula. Never use `pandas.read_excel` directly on these files; you'll get null money columns.
+
+### 8.2 Prior Payroll Generator (ADP / Paycom)
+**Trigger**: User wants to fill a blank Uzio Prior Payroll Template (.xlsm) from up to 10 ADP/Paycom source files.
+1.  **Tools**: `adp_prior_payroll_generator`, `paycom_prior_payroll_generator`
+2.  **Inputs**:
+    *   `uzio_template_path` (preferred) or `uzio_template_b64` — blank Uzio template (.xlsm with VBA, preserved).
+    *   `source_files` — list of `{file_path | file_b64, filename}` (max 10).
+    *   `override_mapping` (optional):
+        *   ADP: `{adp_column_name: uzio_col_idx}` — negative idx force-skips.
+        *   Paycom: `{"type_code|type_description": uzio_col_idx}` — `|` separator since JSON keys can't be tuples.
+3.  **Auto-mapping**: Fuzzy-string heuristic with domain boosts for Medicare / SS / FIT / 401k / FUTA / SUI / SDI / regular / overtime / bonus / state-income. Net Pay auto-routes to whichever Uzio header contains `"net pay"`.
+4.  **Validation**: Flags any employee-period where `Gross − Taxes − Deductions ≠ Net Pay` (capped at 200 rows in response).
+
+### 8.3 Selective Census Sync (ADP / Paycom)
+**Trigger**: User has a pre-filled Uzio Census Template (.xlsm) and only wants to update specific columns from a fresh ADP/Paycom export — leaving every other column / sheet / VBA macro untouched.
+1.  **Tools**: `adp_selective_census_sync`, `paycom_selective_census_sync`
+2.  **Inputs**:
+    *   `uzio_template_path` / `uzio_template_b64` — pre-filled Uzio template.
+    *   `source_path` / `source_b64` — fresh ADP or Paycom export.
+    *   `selected_uzio_cols` — list of Uzio column names (keys from `UZIO_RAW_MAPPING`) to overwrite.
+    *   `job_title_mapping`, `work_location_mapping` — explicit `{source_value: uzio_value}` dicts. Pass `{}` to seed automatically from the existing template (via `extract_mappings_from_uzio`); omit to skip.
+    *   `discover_only=true` — short-circuits to return seed mappings + unique source values for review before committing.
+
+### 8.4 Paycom Consolidated Audit
+**Trigger**: User wants Census + Payment + Emergency contact audits in one pass against the Uzio Master Custom Report (CSV with category labels in row 1, headers in row 2) and a Paycom Census export.
+1.  **Tool**: `paycom_consolidated_audit`
+2.  **Output**: 11-sheet Excel report — Summary, Census, Payment, Emergency, Salaried Driver Exceptions, FLSA Compliance, Active Missing, Terminated Missing, Data Quality, High Hourly Rate Anomalies, Duplicate SSN Warnings.
+3.  **Use over individual audits** when running an end-to-end migration check; saves three round-trips.
+
+### 8.5 Total Comparison (Prior Payroll Audit)
+Both `adp_total_comparison` and `paycom_total_comparison` now produce three additional sheets beyond Full Comparison / Mismatches Only / Employee Mismatches:
+*   **Duplicate Pay Periods** — UZIO-side skeleton-vs-detail row pairs.
+*   **Pay Stub Counts** — per-employee distinct Pay Date count, ADP/Paycom combined vs UZIO.
+*   **Tax Rate Verification** — SS / Medicare / FUTA + per-state SUTA, effective rate vs standard at 0.05% tolerance. SUTA is **always one row per state** — never lumped.
