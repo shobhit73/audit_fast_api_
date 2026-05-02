@@ -1,4 +1,4 @@
-# CLAUDE.md (v1.4)
+# CLAUDE.md (v1.5)
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -73,7 +73,7 @@ Each tool accepts both a local path *and* a base64 fallback — see `load_file()
 - [core/adp/misc_audits.py](core/adp/misc_audits.py) — emergency, license, timeoff
 - [core/misc_audits.py](core/misc_audits.py) — emergency (both vendors), license, timeoff, paycom payment
 
-Real implementations live in: [core/adp/census_audit.py](core/adp/census_audit.py), [core/adp/deduction_audit.py](core/adp/deduction_audit.py), [core/adp/payment_audit.py](core/adp/payment_audit.py), [core/adp/withholding_audit.py](core/adp/withholding_audit.py), [core/adp/total_comparison.py](core/adp/total_comparison.py), [core/adp/prior_payroll_sanity.py](core/adp/prior_payroll_sanity.py), [core/adp/prior_payroll_generator.py](core/adp/prior_payroll_generator.py), [core/adp/selective_census_sync.py](core/adp/selective_census_sync.py), [core/paycom/census_audit.py](core/paycom/census_audit.py), [core/paycom/deduction_analyzer.py](core/paycom/deduction_analyzer.py), [core/paycom/total_comparison.py](core/paycom/total_comparison.py), [core/paycom/withholding_audit.py](core/paycom/withholding_audit.py), [core/paycom/sql_master.py](core/paycom/sql_master.py), [core/paycom/prior_payroll_generator.py](core/paycom/prior_payroll_generator.py), [core/paycom/selective_census_sync.py](core/paycom/selective_census_sync.py), [core/common/paycom_consolidated_audit.py](core/common/paycom_consolidated_audit.py), and [core/census/sanity_check.py](core/census/sanity_check.py).
+Real implementations live in: [core/adp/census_audit.py](core/adp/census_audit.py), [core/adp/deduction_audit.py](core/adp/deduction_audit.py), [core/adp/payment_audit.py](core/adp/payment_audit.py), [core/adp/withholding_audit.py](core/adp/withholding_audit.py), [core/adp/total_comparison.py](core/adp/total_comparison.py), [core/adp/prior_payroll_sanity.py](core/adp/prior_payroll_sanity.py), [core/adp/prior_payroll_generator.py](core/adp/prior_payroll_generator.py), [core/adp/prior_payroll_setup_helper.py](core/adp/prior_payroll_setup_helper.py), [core/adp/selective_census_sync.py](core/adp/selective_census_sync.py), [core/paycom/census_audit.py](core/paycom/census_audit.py), [core/paycom/deduction_analyzer.py](core/paycom/deduction_analyzer.py), [core/paycom/total_comparison.py](core/paycom/total_comparison.py), [core/paycom/withholding_audit.py](core/paycom/withholding_audit.py), [core/paycom/sql_master.py](core/paycom/sql_master.py), [core/paycom/prior_payroll_generator.py](core/paycom/prior_payroll_generator.py), [core/paycom/selective_census_sync.py](core/paycom/selective_census_sync.py), [core/common/paycom_consolidated_audit.py](core/common/paycom_consolidated_audit.py), and [core/census/sanity_check.py](core/census/sanity_check.py).
 
 ### Prior Payroll Sanity (`core/adp/prior_payroll_sanity.py`)
 
@@ -89,6 +89,22 @@ Critical: ADP money cells are stored as `=ROUND(x, 2.0)` Excel formulas. `pandas
 `run_adp_prior_payroll_sanity(content, filename, swap_net_take=True, aggregation_strategy="full_quarter")` returns `(csv_bytes, summary_dict)`. `aggregation_strategy` mirrors the Streamlit UI's radio: `"full_quarter"` collapses everything to one row per associate; `"preserve_pay_periods"` keeps distinct pay periods and only merges same-day duplicate row pairs. Output is CSV with the input's exact column headers and column order — the API expects ADP-shape, no renames.
 
 Exposed both via FastAPI (`/audit/adp/prior-payroll-sanity`) and MCP (`adp_prior_payroll_sanity` tool).
+
+### Prior Payroll Setup Helper (`core/adp/prior_payroll_setup_helper.py`)
+
+Reverse-discovers what to configure in Uzio when migrating an ADP client. Given a sanitized ADP Prior Payroll file plus the State Tax Code master CSV, emits an Excel workbook plus a standalone Tax_Mapping CSV.
+
+Key sheets and the algorithms behind them:
+
+- **Earnings_Codes**: every distinct `REGULAR EARNINGS / OVERTIME EARNINGS / ADDITIONAL EARNINGS : XXX-NAME` column with $ total, employee count, paired hours total, and avg rate.
+- **Contributions** vs **Deductions**: `VOLUNTARY DEDUCTION :` columns split by name pattern (`401K|403B|457|ROTH|HSA|FSA|RETIRE|K-` → contribution; everything else → deduction).
+- **Pre-tax / post-tax verdict** (the load-bearing bit): for each row, `gap_FIT = TOTAL EARNINGS - FEDERAL INCOME - EMPLOYEE TAXABLE`. Try every subset of that row's non-zero deductions; if any subset sums to `gap_FIT` within $0.02, every member is **pre-tax for FIT**. *One positive proof anywhere in the file = pre-tax for everyone* — the rule never varies per employee, per the user's hand-process. Same logic on FICA / MEDI / SIT taxables to derive the flavor: `section_125` (pre-FIT/FICA/MEDI/SIT — medical/dental/vision), `401k_traditional` (pre-FIT/SIT only, NOT pre-FICA/MEDI). Empirically validated against Carvan Q1 (`K-ADP 401K → 401k_traditional`, `75-SUPPORT → post_tax`) and Travel Mgmt Q1 (`MED/DEN/VIS → section_125`, `ADV/IPY/REV/75-SUPPORT → post_tax`). Falls back to a name heuristic only when zero rows are available to test.
+- **Tax_Mapping**: produces rows in the exact `Payroll_Mappings_Tax_Mapping_CORRECTED.csv` column order. Federal taxes (FIT / MEDI / FICA / ER_MEDI / ER_FICA / ER_FUTA) get one row each; state-scoped taxes (SIT / SDI / ER_SUTA / FLI) get **one row per distinct WORKED IN STATE present in the file** (multi-state clients respect the SUTA-per-state rule). Lookups use a canonical regex `^\d{2}-000-0000-{TYPE}-000$` against `unique_tax_id` in the State Tax Code master, preferring entries with empty `sub_tax_desc`. `TOTAL EMPLOYEE TAX` / `TOTAL EMPLOYER TAX` aggregate columns are intentionally filtered out before mapping.
+- **Bonus_Classification**: FLSA test. For every row with both `BNS-BONUS / BN*` earning AND overtime hours, compute `regular_rate = REGULAR EARNINGS / REGULAR HOURS` then compare actual OT rate to `1.5 × regular_rate`. Tolerance is 0.5%. **Any single row** showing actual OT rate materially above 1.5× → bonus is `non_discretionary` for the whole file (FLSA conservative — once a bonus has inflated the regular rate, it's non-discretionary by IRS rule).
+
+State Tax Code master path defaults to `C:\Users\shobhit.sharma\Downloads\State Tax Code.csv`; can be overridden via `state_tax_master_path` or `state_tax_master_base64`.
+
+Exposed via FastAPI (`/audit/adp/prior-payroll-setup-helper`) and MCP (`adp_prior_payroll_setup_helper` tool). Output also writes the Tax_Mapping CSV to the audit inbox alongside the Excel workbook so it can be uploaded directly to the next migration step.
 
 ### Prior Payroll Generator (`core/{adp,paycom}/prior_payroll_generator.py`)
 

@@ -250,6 +250,24 @@ try:
             return StreamingResponse(io.BytesIO(csv_bytes), media_type="text/csv", headers=headers)
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
+    from core.adp.prior_payroll_setup_helper import run_adp_prior_payroll_setup_helper
+
+    @app.post("/audit/adp/prior-payroll-setup-helper")
+    async def adp_prior_payroll_setup_helper(
+        file: UploadFile = File(...),
+        state_tax_master: UploadFile = File(...),
+    ):
+        try:
+            content = await file.read()
+            master = await state_tax_master.read()
+            results, csv_bytes = run_adp_prior_payroll_setup_helper(
+                content,
+                adp_filename=file.filename or "adp.xlsx",
+                state_tax_master_content=master,
+            )
+            return {"results": results, "tax_mapping_csv_b64": __import__("base64").b64encode(csv_bytes).decode()}
+        except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
     from core.misc_audits import run_adp_emergency_audit, run_paycom_emergency_audit, run_adp_license_audit, run_adp_timeoff_audit, run_paycom_timeoff_audit, run_paycom_payment_audit
 
     @app.post("/audit/paycom/payment")

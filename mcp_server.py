@@ -39,6 +39,7 @@ from core.paycom.prior_payroll_generator import run_paycom_prior_payroll_generat
 from core.adp.selective_census_sync import run_adp_selective_census_sync, discover_mappings as adp_selective_discover
 from core.paycom.selective_census_sync import run_paycom_selective_census_sync, discover_mappings as paycom_selective_discover
 from core.common.paycom_consolidated_audit import run_paycom_consolidated_audit
+from core.adp.prior_payroll_setup_helper import run_adp_prior_payroll_setup_helper
 
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
@@ -662,6 +663,50 @@ async def handle_list_tools() -> list[types.Tool]:
                             "only merges same-day duplicate row pairs (matches the Streamlit "
                             "'Preserve Pay Periods' radio)."
                         ),
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="adp_prior_payroll_setup_helper",
+            description=(
+                "Discovers what to configure in Uzio for an ADP Prior Payroll migration. "
+                "Given a (sanitized) ADP Prior Payroll file plus the State Tax Code master "
+                "CSV, produces an Excel workbook with:\n"
+                "  - Earnings catalog (REGULAR / OVERTIME + every ADDITIONAL EARNINGS code)\n"
+                "  - Contributions catalog (401k / 403b / 457 / Roth / HSA / FSA codes)\n"
+                "  - Deductions catalog with pre-tax vs post-tax verdict per code\n"
+                "  - Taxes discovered (every '* - EMPLOYEE/EMPLOYER TAX' column)\n"
+                "  - Tax_Mapping sheet (and a CSV alongside) in the "
+                "'Payroll_Mappings_Tax_Mapping_CORRECTED' format, with one row per "
+                "(tax_type, state) - federal taxes get 1 row, state-scoped taxes (SIT, SDI, "
+                "SUTA, FLI) get 1 row per distinct WORKED IN STATE present in the file\n"
+                "  - Bonus_Classification (FLSA test: actual OT pay vs 1.5 x regular rate; "
+                "any single row showing inflation = bonus is non-discretionary)\n\n"
+                "Pre/post-tax algorithm: for each row, gap_FIT = TOTAL EARNINGS minus "
+                "FEDERAL INCOME - EMPLOYEE TAXABLE. Find any subset of non-zero deductions "
+                "summing to gap_FIT; every member is pre-tax for FIT. One positive proof in "
+                "the whole file = pre-tax for everyone (the rule never varies per employee). "
+                "Same logic for FICA / MEDI / SIT to derive flavor: section_125 (medical/"
+                "dental/vision pre-FIT/FICA/MEDI/SIT) vs 401k_traditional (pre-FIT/SIT only)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                    "file_base64": {"type": "string", "description": "Fallback: base64 encoded ADP Prior Payroll file (sanitized)."},
+                    "filename": {"type": "string", "description": "Optional filename hint, used for extension dispatch when file_base64 is supplied."},
+                    "state_tax_master_path": {
+                        "type": "string",
+                        "description": (
+                            "Local path to the State Tax Code master CSV "
+                            "(default: C:/Users/shobhit.sharma/Downloads/State Tax Code.csv). "
+                            "Required to populate Uzio Tax Code / Unique Tax ID columns."
+                        ),
+                    },
+                    "state_tax_master_base64": {
+                        "type": "string",
+                        "description": "Fallback: base64 encoded State Tax Code master CSV.",
                     },
                 },
             },
@@ -1376,6 +1421,35 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 "swap_applied": summary.get("swap_applied", False),
             }
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
+        elif name == "adp_prior_payroll_setup_helper":
+            content = load_file(arguments, "file_path", "file_base64")
+            file_path_arg = arguments.get("file_path")
+            filename = arguments.get("filename") or (
+                os.path.basename(file_path_arg) if file_path_arg else "adp_prior_payroll.xlsx"
+            )
+            master_path = arguments.get("state_tax_master_path") or r"C:\Users\shobhit.sharma\Downloads\State Tax Code.csv"
+            master_b64 = arguments.get("state_tax_master_base64")
+            master_content = b""
+            if master_path and os.path.isfile(master_path.strip().strip('"')):
+                with open(master_path.strip().strip('"'), "rb") as f:
+                    master_content = f.read()
+            elif master_b64:
+                master_content = base64.b64decode(master_b64)
+            results, csv_bytes = run_adp_prior_payroll_setup_helper(
+                content, adp_filename=filename, state_tax_master_content=master_content,
+            )
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            base = os.path.splitext(filename)[0] or "ADP_Prior_Payroll"
+            if not os.path.exists(AUDIT_INBOX):
+                os.makedirs(AUDIT_INBOX, exist_ok=True)
+            tax_csv_path = os.path.join(AUDIT_INBOX, f"{base}_Tax_Mapping_{stamp}.csv")
+            with open(tax_csv_path, "wb") as f:
+                f.write(csv_bytes)
+            summary_info = save_results_to_excel(results, f"{base}_Setup_Helper")
+            summary_info["tax_mapping_csv"] = tax_csv_path
+            return [types.TextContent(type="text", text=json.dumps(summary_info, indent=2, default=_json_default))]
 
         elif name == "adp_census_generator":
             content = load_file(arguments, "file_path", "file_base64")

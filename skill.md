@@ -1,4 +1,4 @@
-# Claude Desktop - Multi-Agent Payroll Migration SOP (v1.4)
+# Claude Desktop - Multi-Agent Payroll Migration SOP (v1.5)
 Before starting any audit or analysis, you **must** verify the data location.
 1.  **Check Location**: If the files are in `Downloads` or a client folder, you **must** use the `copy_to_audit_inbox` tool to move them to `C:\Users\shobhit.sharma\Desktop\Audit Files`.
 2.  **Verify Size**: If the file is >1MB, **never** use base64 fallback. Always use `file_path`.
@@ -110,7 +110,24 @@ If the user mentions a specific client (e.g., "Happy Delivery"):
 2.  **Output**: 11-sheet Excel report — Summary, Census, Payment, Emergency, Salaried Driver Exceptions, FLSA Compliance, Active Missing, Terminated Missing, Data Quality, High Hourly Rate Anomalies, Duplicate SSN Warnings.
 3.  **Use over individual audits** when running an end-to-end migration check; saves three round-trips.
 
-### 8.5 Total Comparison (Prior Payroll Audit)
+### 8.5 Prior Payroll Setup Helper (ADP)
+**Trigger**: Starting a fresh ADP prior payroll migration; need to know what to configure in Uzio (earnings, contributions, taxes, deductions) and how to map taxes/deductions correctly.
+1.  **Pre-step**: Run `adp_prior_payroll_sanity` first if the file has interleaved `Totals For Associate ID` rows. The setup helper expects a clean, one-row-per-associate-per-period file.
+2.  **Tool**: `adp_prior_payroll_setup_helper`
+3.  **Inputs**:
+    *   `file_path` (preferred) or `file_base64` — sanitized ADP prior payroll file (.xlsx / .csv).
+    *   `state_tax_master_path` — defaults to `C:\Users\shobhit.sharma\Downloads\State Tax Code.csv`. Override only if the master is elsewhere.
+    *   `state_tax_master_base64` — fallback for remote callers.
+4.  **Output** (Excel workbook in `Audit Files` + standalone Tax_Mapping CSV):
+    *   `Earnings_Codes` — every REGULAR/OVERTIME and `ADDITIONAL EARNINGS : XXX` code with $ total, employee count, hours, avg rate.
+    *   `Contributions` — 401k/403b/457/Roth/HSA/FSA codes, each with pre-tax verdict and flavor.
+    *   `Deductions` — every other voluntary deduction with **pre-tax vs post-tax verdict** (algorithm: subset-sum on `TOTAL EARNINGS − FIT_TAXABLE`; one positive proof = pre-tax for the whole file). Flavor distinguishes `section_125` (medical/dental/vision pre-FIT/FICA/MEDI/SIT) from `401k_traditional` (pre-FIT/SIT only).
+    *   `Taxes_Discovered` — every `* - EMPLOYEE/EMPLOYER TAX` column.
+    *   `Tax_Mapping` — output in `Payroll_Mappings_Tax_Mapping_CORRECTED.csv` format. Federal = 1 row per tax; state-scoped (SIT/SDI/SUTA/FLI) = **1 row per distinct WORKED IN STATE** (multi-state respects the SUTA-per-state rule).
+    *   `Bonus_Classification` — FLSA test verdict (`discretionary` / `non_discretionary` / `indeterminate`). Compares actual OT rate to `1.5 × regular_rate`; any row showing inflation = non-discretionary for the whole file.
+5.  **Standalone CSV**: `<filename>_Tax_Mapping_<timestamp>.csv` is also written to `Audit Files` so you can upload it directly into the next migration step.
+
+### 8.6 Total Comparison (Prior Payroll Audit)
 Both `adp_total_comparison` and `paycom_total_comparison` now produce three additional sheets beyond Full Comparison / Mismatches Only / Employee Mismatches:
 *   **Duplicate Pay Periods** — UZIO-side skeleton-vs-detail row pairs.
 *   **Pay Stub Counts** — per-employee distinct Pay Date count, ADP/Paycom combined vs UZIO.
