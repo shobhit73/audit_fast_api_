@@ -142,6 +142,134 @@ def calculate_totals_paycom(df, mapping_source_names, filename, uzio_item_name="
 
     return sum(emp_tots.values()), list(found_items), emp_tots
 
+# Standard federal tax rates used for verification (in percent)
+STANDARD_TAX_RATES = {
+    "Social Security EE": 6.20,
+    "Social Security ER": 6.20,
+    "Medicare EE":        1.45,
+    "Medicare ER":        1.45,
+    "FUTA ER":            0.60,
+}
+RATE_TOLERANCE_PCT = 0.05
+
+
+def _filter_data_rows(df, eid_col):
+    if not eid_col:
+        return df
+    work = df[df[eid_col].notna()].copy()
+    work[eid_col] = work[eid_col].astype(str).str.strip()
+    return work[(work[eid_col] != "") & (~work[eid_col].str.lower().str.contains("total|grand", na=False))]
+
+
+def _sum_uzio_section(df, header_top, section_name, side):
+    """Sum Taxable Wages and EE/ER Amount within a UZIO section header."""
+    if not header_top:
+        return 0.0, 0.0
+    eid_col = next((c for c in df.columns if any(x in str(c).lower() for x in ["employee id", "associate id"])), None)
+    work = _filter_data_rows(df, eid_col)
+    target = norm_colname(section_name).lower()
+    wages = amount = 0.0
+    for i, h in enumerate(header_top):
+        if pd.notna(h) and norm_colname(str(h)).lower() == target:
+            end_i = len(df.columns)
+            for j in range(i + 1, len(header_top)):
+                if pd.notna(header_top[j]) and str(header_top[j]).strip() != "":
+                    end_i = j
+                    break
+            for k in range(i, end_i):
+                col = str(df.columns[k]).strip().lower()
+                if "taxable wages" in col:
+                    wages += work.iloc[:, k].apply(clean_money_val).sum()
+                elif side == "EE" and (col == "ee amount" or col.startswith("ee amount.")):
+                    amount += work.iloc[:, k].apply(clean_money_val).sum()
+                elif side == "ER" and (col == "er amount" or col.startswith("er amount.")):
+                    amount += work.iloc[:, k].apply(clean_money_val).sum()
+            break
+    return wages, amount
+
+
+def _sum_paycom_for_uzio_name(paycom_data_list, source_names):
+    """Best-effort sum of (taxable wages, amount) across Paycom long-format rows.
+    Wages are inferred from rows whose Description matches the tax with 'tax'->'wages',
+    or contains 'taxable wages'/'wages' for the same tax."""
+    if not source_names:
+        return 0.0, 0.0
+    desc_aliases = ["type description", "description", "earning/deduction/tax", "code description", "row labels"]
+    norm_targets = [n.lower().strip() for n in source_names]
+    wage_targets = set()
+    for n in norm_targets:
+        wage_targets.add(re.sub(r"\btax\b", "wages", n, flags=re.I))
+        wage_targets.add(n + " wages")
+        wage_targets.add(n + " taxable wages")
+
+    total_w = total_a = 0.0
+    for df_p, _ in paycom_data_list:
+        desc_col = next((c for c in df_p.columns if any(x in str(c).lower() for x in desc_aliases)), None)
+        amt_col  = next((c for c in df_p.columns if "current amount" in str(c).lower()), None)
+        if not amt_col:
+            amt_col = next((c for c in df_p.columns if any(x in str(c).lower() for x in ["amount", "total amount", "value", "sum of amount"])), None)
+        if not desc_col or not amt_col:
+            continue
+        for _, row in df_p.iterrows():
+            d = str(row[desc_col]).strip().lower()
+            if d in norm_targets:
+                total_a += clean_money_val(row[amt_col])
+            elif d in wage_targets:
+                total_w += clean_money_val(row[amt_col])
+    return total_w, total_a
+
+
+def compute_tax_rate_verification(df_uzio, uzio_top, paycom_data_list, mappings):
+    """Build the tax-rate verification table (SS, Medicare, FUTA, SUTA per state) for Paycom."""
+    uzio_to_source = {}
+    for m in mappings:
+        if m.get("Category") == "Taxes":
+            uzio_to_source.setdefault(m["UZIO_Name"], []).append(m.get("Source_Name") or m.get("ADP_Name"))
+
+    targets = [
+        ("Social Security", "EE", "Social Security Tax",          STANDARD_TAX_RATES["Social Security EE"]),
+        ("Social Security", "ER", "Employer Social Security Tax", STANDARD_TAX_RATES["Social Security ER"]),
+        ("Medicare",        "EE", "Medicare Tax",                 STANDARD_TAX_RATES["Medicare EE"]),
+        ("Medicare",        "ER", "Employer Medicare Tax",        STANDARD_TAX_RATES["Medicare ER"]),
+        ("FUTA",            "ER", "Federal Unemployment Tax",     STANDARD_TAX_RATES["FUTA ER"]),
+    ]
+    if uzio_top:
+        suta_re = re.compile(r"^\s*([A-Z]{2})\s+STATE\s+UNEMPLOYMENT\s+TAX\s*$", re.I)
+        for h in uzio_top:
+            if pd.notna(h):
+                m = suta_re.match(str(h))
+                if m:
+                    targets.append((f"SUTA - {m.group(1).upper()}", "ER", str(h).strip(), None))
+
+    rows = []
+    for tax, side, uzio_name, std in targets:
+        u_w, u_a = _sum_uzio_section(df_uzio, uzio_top, uzio_name, side)
+        p_w, p_a = _sum_paycom_for_uzio_name(paycom_data_list, uzio_to_source.get(uzio_name, []))
+        u_rate = (u_a / u_w * 100) if u_w > 0 else None
+        p_rate = (p_a / p_w * 100) if p_w > 0 else None
+        if std is None:
+            status = "Info (Employer-set)"
+            std_disp = "Employer-set"
+        else:
+            off_u = (u_rate is not None) and abs(u_rate - std) > RATE_TOLERANCE_PCT
+            off_p = (p_rate is not None) and abs(p_rate - std) > RATE_TOLERANCE_PCT
+            status = "Mismatch" if (off_u or off_p) else "Match"
+            std_disp = f"{std:.2f}%"
+        rows.append({
+            "Tax": tax,
+            "Side": side,
+            "Paycom Taxable Wages":  round(p_w, 2),
+            "Paycom Amount":         round(p_a, 2),
+            "Paycom Effective Rate": (f"{p_rate:.4f}%" if p_rate is not None else "-"),
+            "UZIO Taxable Wages":    round(u_w, 2),
+            "UZIO Amount":           round(u_a, 2),
+            "UZIO Effective Rate":   (f"{u_rate:.4f}%" if u_rate is not None else "-"),
+            "Standard Rate":         std_disp,
+            "Status":                status,
+        })
+    return rows
+
+
 def run_paycom_total_comparison(paycom_files_data, uzio_file_data, mappings):
     """
     Full production-grade Paycom total comparison — 3 sheets matching apps/paycom/total_comparison.py.
@@ -250,9 +378,13 @@ def run_paycom_total_comparison(paycom_files_data, uzio_file_data, mappings):
         })
 
     mismatches_only = [r for r in results if r["Status"] == "Mismatch"]
+
+    tax_rate_verification = compute_tax_rate_verification(df_uzio, uzio_top, paycom_data_list, mappings)
+
     return {
         "Full Comparison": results,
         "Mismatches Only": mismatches_only,
         "Employee Mismatches": employee_mismatches,
-        "All Employee Details": all_employee_details
+        "All Employee Details": all_employee_details,
+        "Tax Rate Verification": tax_rate_verification,
     }
