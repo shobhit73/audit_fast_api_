@@ -1,4 +1,4 @@
-# CLAUDE.md (v1.3)
+# CLAUDE.md (v1.4)
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -73,7 +73,43 @@ Each tool accepts both a local path *and* a base64 fallback — see `load_file()
 - [core/adp/misc_audits.py](core/adp/misc_audits.py) — emergency, license, timeoff
 - [core/misc_audits.py](core/misc_audits.py) — emergency (both vendors), license, timeoff, paycom payment
 
-Real implementations live in: [core/adp/census_audit.py](core/adp/census_audit.py), [core/adp/deduction_audit.py](core/adp/deduction_audit.py), [core/adp/payment_audit.py](core/adp/payment_audit.py), [core/adp/withholding_audit.py](core/adp/withholding_audit.py), [core/adp/total_comparison.py](core/adp/total_comparison.py), [core/paycom/census_audit.py](core/paycom/census_audit.py), [core/paycom/deduction_analyzer.py](core/paycom/deduction_analyzer.py), [core/paycom/total_comparison.py](core/paycom/total_comparison.py), [core/paycom/withholding_audit.py](core/paycom/withholding_audit.py), [core/paycom/sql_master.py](core/paycom/sql_master.py), and [core/census/sanity_check.py](core/census/sanity_check.py).
+Real implementations live in: [core/adp/census_audit.py](core/adp/census_audit.py), [core/adp/deduction_audit.py](core/adp/deduction_audit.py), [core/adp/payment_audit.py](core/adp/payment_audit.py), [core/adp/withholding_audit.py](core/adp/withholding_audit.py), [core/adp/total_comparison.py](core/adp/total_comparison.py), [core/adp/prior_payroll_sanity.py](core/adp/prior_payroll_sanity.py), [core/adp/prior_payroll_generator.py](core/adp/prior_payroll_generator.py), [core/adp/selective_census_sync.py](core/adp/selective_census_sync.py), [core/paycom/census_audit.py](core/paycom/census_audit.py), [core/paycom/deduction_analyzer.py](core/paycom/deduction_analyzer.py), [core/paycom/total_comparison.py](core/paycom/total_comparison.py), [core/paycom/withholding_audit.py](core/paycom/withholding_audit.py), [core/paycom/sql_master.py](core/paycom/sql_master.py), [core/paycom/prior_payroll_generator.py](core/paycom/prior_payroll_generator.py), [core/paycom/selective_census_sync.py](core/paycom/selective_census_sync.py), [core/common/paycom_consolidated_audit.py](core/common/paycom_consolidated_audit.py), and [core/census/sanity_check.py](core/census/sanity_check.py).
+
+### Prior Payroll Sanity (`core/adp/prior_payroll_sanity.py`)
+
+ADP-only tool ported from the Streamlit `apps/adp/prior_payroll_sanity.py`. Cleans a Prior Payroll export so it can be ingested by downstream APIs:
+
+1. Drops the interleaved `Totals For Associate ID XYZ:` summary rows the ADP report emits between pay-period rows.
+2. Detects + removes the bottom-of-file grand-total row where the last employee's ID got bled into the totals.
+3. Aggregates per-pay-period exports back to one row per associate when the file has multiple rows per Associate ID.
+4. Optionally swaps NET PAY ⇄ TAKE HOME values (default ON) — the Carvan-style API maps these reversed; column headers are NEVER renamed.
+
+Critical: ADP money cells are stored as `=ROUND(x, 2.0)` Excel formulas. `pandas.read_excel` returns null for those, so this module reads with `openpyxl` and runs every cell through `_evaluate_cell` which extracts the literal value from the formula. If you add a new ADP-side reader anywhere else, use the same evaluator or you'll get all-null money columns.
+
+`run_adp_prior_payroll_sanity(content, filename, swap_net_take=True, aggregation_strategy="full_quarter")` returns `(csv_bytes, summary_dict)`. `aggregation_strategy` mirrors the Streamlit UI's radio: `"full_quarter"` collapses everything to one row per associate; `"preserve_pay_periods"` keeps distinct pay periods and only merges same-day duplicate row pairs. Output is CSV with the input's exact column headers and column order — the API expects ADP-shape, no renames.
+
+Exposed both via FastAPI (`/audit/adp/prior-payroll-sanity`) and MCP (`adp_prior_payroll_sanity` tool).
+
+### Prior Payroll Generator (`core/{adp,paycom}/prior_payroll_generator.py`)
+
+Ports of the Streamlit `apps/{adp,paycom}/prior_payroll_generator.py` tools. Both fill a blank Uzio Prior Payroll Template (.xlsm) from up to 10 source files. Auto-mapping uses a fuzzy-string heuristic (`auto_guess_mapping`) with domain boosts for Medicare / Social Security / FIT / 401k / FUTA / SUI / SDI / regular / overtime / bonus / state-income. Each tool accepts an `override_mapping` parameter:
+
+- ADP keys are simple `{adp_column_name: uzio_col_idx}`.
+- Paycom keys are `{"type_code|type_description": uzio_col_idx}` (string with a `|` separator) since JSON object keys can't be tuples.
+
+Negative `uzio_col_idx` force-skips that column. Net Pay is auto-routed to whichever Uzio column header contains `"net pay"`. Validation flags any employee-period where `Gross − Taxes − Deductions ≠ Net Pay` (returned in the response, capped at 200 rows).
+
+### Selective Census Sync (`core/{adp,paycom}/selective_census_sync.py`)
+
+Port of the Streamlit `apps/{adp,paycom}/census_generator.py`'s `render_selective_census_generator` entry point. Updates ONLY the columns named in `selected_uzio_cols` (keys from `UZIO_RAW_MAPPING`) in a pre-filled Uzio Census Template (.xlsm), leaving every other column / sheet / VBA macro untouched. Source-side IDs are normalized via `norm_key_series` for matching.
+
+Job Title and Work Location are special: callers pass an explicit `{source_value: uzio_value}` dict, pass `{}` to seed automatically from the existing template (via `extract_mappings_from_uzio` which walks the current Uzio data to learn the convention), or omit to skip syncing those columns. `discover_only=true` short-circuits to return the seed mappings + unique source values for review.
+
+### Paycom Consolidated Audit (`core/common/paycom_consolidated_audit.py`)
+
+Port of the Streamlit `apps/common/paycom_combined_audit.py` tool. Runs Census + Payment + Emergency contact audits in one pass against the Uzio Master Custom Report (CSV with category labels in row 1, headers in row 2) and a Paycom Census export. Plus six anomaly extracts (salaried-driver exceptions, FLSA compliance, active-missing, terminated-missing, data quality, high-rate anomalies) and duplicate-SSN warnings. Output is 11 sheets via `save_results_to_excel`.
+
+Internal helper `_detect_duplicate_ssns_with_ids(df, id_col, ssn_col)` lives inside this module rather than in `utils/audit_utils.py` because the existing `detect_duplicate_ssns(df, ssn_col)` in utils has a different signature kept stable for `core/adp/census_audit.py`. Don't merge them.
 
 ### Selective Extraction
 
@@ -94,9 +130,13 @@ The `selective_employee_extractor` tool in `mcp_server.py` allows for targeted a
 
 ## utils/audit_utils.py — shared engine
 
-[utils/audit_utils.py](utils/audit_utils.py) is a slimmed-down version of the Streamlit project's helper module. It only contains read/normalize utilities (`norm_colname`, `norm_blank`, `norm_ssn_canonical`, `read_uzio_raw_file`, `find_header_and_data`, identity-matching helpers, etc.). It does **not** contain the Uzio template generator (`generate_uzio_template`, `inject_into_uzio_template`) — those are Streamlit-only.
+[utils/audit_utils.py](utils/audit_utils.py) is a slimmed-down version of the Streamlit project's helper module. It contains read/normalize utilities (`norm_col`, `norm_colname`, `norm_blank`, `norm_ssn_canonical`, `norm_id`, `norm_key_series`, `read_uzio_raw_file`, `find_header_and_data`, identity-matching helpers), the Uzio template injector (`inject_into_uzio_template`), and the selective-census-sync helpers (`read_uzio_template_df`, `extract_mappings_from_uzio`, `selective_update_uzio`).
+
+It does **not** contain the full Uzio template generator (`generate_uzio_template`) — that's Streamlit-only.
 
 If you find yourself wanting to import something from `utils/audit_utils.py` that isn't there, it probably exists in the Streamlit parent's `utils/audit_utils.py` and needs to be ported.
+
+`detect_duplicate_ssns(df, ssn_col)` returns a DataFrame; the streamlit version has a different `(df, id_col, ssn_col)` signature returning a `{ssn: [ids]}` dict. Don't merge them — `core/adp/census_audit.py` depends on the current shape, and `core/common/paycom_consolidated_audit.py` defines its own `_detect_duplicate_ssns_with_ids` for the streamlit-style result.
 
 ## File I/O conventions (carried over from the Streamlit project)
 
