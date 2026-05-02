@@ -37,6 +37,7 @@ from core.adp.prior_payroll_sanity import run_adp_prior_payroll_sanity
 from core.adp.prior_payroll_generator import run_adp_prior_payroll_generator
 from core.paycom.prior_payroll_generator import run_paycom_prior_payroll_generator
 from core.adp.selective_census_sync import run_adp_selective_census_sync, discover_mappings as adp_selective_discover
+from core.paycom.selective_census_sync import run_paycom_selective_census_sync, discover_mappings as paycom_selective_discover
 
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
@@ -649,6 +650,18 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "boolean",
                         "description": "Swap NET PAY <-> TAKE HOME values (the API expects them reversed). Default true.",
                     },
+                    "aggregation_strategy": {
+                        "type": "string",
+                        "enum": ["full_quarter", "preserve_pay_periods"],
+                        "description": (
+                            "How to handle multi-row-per-associate files. "
+                            "'full_quarter' (default) collapses all rows for an associate "
+                            "into one (matches the Streamlit 'Full Quarter (Default)' radio). "
+                            "'preserve_pay_periods' keeps distinct pay periods intact and "
+                            "only merges same-day duplicate row pairs (matches the Streamlit "
+                            "'Preserve Pay Periods' radio)."
+                        ),
+                    },
                 },
             },
         ),
@@ -1215,8 +1228,12 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 os.path.basename(file_path_arg) if file_path_arg else "upload.xlsx"
             )
             swap_net_take = bool(arguments.get("swap_net_take", True))
+            agg_strategy = arguments.get("aggregation_strategy") or "full_quarter"
             csv_bytes, summary = run_adp_prior_payroll_sanity(
-                content, filename=filename, swap_net_take=swap_net_take
+                content,
+                filename=filename,
+                swap_net_take=swap_net_take,
+                aggregation_strategy=agg_strategy,
             )
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")

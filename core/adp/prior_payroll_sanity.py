@@ -114,6 +114,98 @@ def drop_summary_rows(df):
     return df[mask].reset_index(drop=True), int(removed)
 
 
+def _smart_merge_value(values):
+    """Pick the best value across duplicate rows for a single column.
+    Used by merge_duplicate_pay_periods (the 'preserve_pay_periods' strategy).
+    """
+    cleaned = []
+    for v in values:
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            continue
+        sv = str(v).strip()
+        if sv in ("", "-", "nan", "NaT"):
+            continue
+        cleaned.append(v)
+    if not cleaned:
+        return values[0] if len(values) > 0 else None
+
+    best_num = None
+    best_num_val = None
+    for v in cleaned:
+        try:
+            num = clean_money_val(v)
+            if best_num is None or abs(num) > abs(best_num_val):
+                best_num = v
+                best_num_val = num
+        except Exception:
+            continue
+    if best_num is not None and best_num_val is not None and best_num_val != 0:
+        return best_num
+    return cleaned[0]
+
+
+def merge_duplicate_pay_periods(df):
+    """Fold rows that share Employee ID + Pay Date (+ optional period start/end) into
+    one row, but keep distinct pay periods intact. Used by the 'preserve_pay_periods'
+    aggregation strategy. Returns (cleaned_df, list_of_merge_events).
+    """
+    eid_col = _find_col(df, ["Associate ID", "Employee ID", "File #"])
+    pay_col = _find_col(df, ["Pay Date", "Check Date", "Pay Period End Date"])
+    start_col = _find_col(df, ["Period Start", "Pay Period Start", "Start Date"])
+    end_col = _find_col(df, ["Period End", "Pay Period End", "End Date"])
+
+    if not eid_col or not pay_col:
+        return df, []
+
+    keys = [eid_col, pay_col]
+    if start_col and start_col not in keys:
+        keys.append(start_col)
+    if end_col and end_col not in keys:
+        keys.append(end_col)
+
+    work = df.copy()
+    work["_orig_idx"] = range(len(work))
+
+    grouped = work.groupby(keys, dropna=False, sort=False)
+    counts = grouped.size().reset_index(name="_n")
+    dup_keys = counts[counts["_n"] > 1]
+    if dup_keys.empty:
+        return df.reset_index(drop=True), []
+
+    drop_indices = set()
+    merge_events = []
+    merged_records = []
+
+    for key_vals, group in grouped:
+        if len(group) == 1:
+            continue
+        first_idx = int(group["_orig_idx"].iloc[0])
+        merged = {col: _smart_merge_value(group[col].tolist()) for col in df.columns}
+        merged_records.append((first_idx, merged))
+        drop_indices.update(int(i) for i in group["_orig_idx"].tolist())
+        merge_events.append({
+            "Employee ID": str(key_vals[0]),
+            "Pay Date": str(key_vals[1]),
+            "Rows merged": int(len(group)),
+            "Kept canonical row at original index": first_idx,
+        })
+
+    cleaned_rows = []
+    for i in range(len(df)):
+        if i in drop_indices:
+            continue
+        cleaned_rows.append(df.iloc[i].to_dict())
+    for first_idx, merged in merged_records:
+        merged["_insert_at"] = first_idx
+        cleaned_rows.append(merged)
+    cleaned_rows.sort(key=lambda r: r.get("_insert_at", -1) if "_insert_at" in r else -1)
+    for r in cleaned_rows:
+        r.pop("_insert_at", None)
+
+    cleaned = pd.DataFrame(cleaned_rows, columns=df.columns)
+    return cleaned.reset_index(drop=True), merge_events
+
+
 def detect_per_pay_period_structure(df):
     """Return ('aggregate', summary) when any associate has more than one row,
     otherwise ('none', summary). Aggregation is the right move for ADP files where
@@ -297,10 +389,23 @@ def detect_grand_total_row(df):
     return df, None
 
 
-def run_adp_prior_payroll_sanity(content, filename="upload.xlsx", swap_net_take=True):
+def run_adp_prior_payroll_sanity(
+    content,
+    filename="upload.xlsx",
+    swap_net_take=True,
+    aggregation_strategy="full_quarter",
+):
     """Run the full sanity-check pipeline on ADP file bytes.
 
-    Returns (csv_bytes, summary_dict). The csv_bytes are UTF-8 encoded.
+    aggregation_strategy:
+      - 'full_quarter' (default): when the file has multiple rows per associate,
+        roll everything up into ONE row per associate (the user's "Full Quarter
+        (Default)" UI option). This is the standard implementor-error-fixer.
+      - 'preserve_pay_periods': keep distinct pay-period rows but merge any
+        same-day duplicates within a single pay date (the user's "Preserve Pay
+        Periods" UI option). Useful when the API expects per-period rows.
+
+    Returns (csv_bytes, summary_dict). csv_bytes are UTF-8 encoded.
     """
     df_in, header_idx, sheet = read_input_bytes(content, filename)
     original_count = len(df_in)
@@ -308,8 +413,13 @@ def run_adp_prior_payroll_sanity(content, filename="upload.xlsx", swap_net_take=
     df_b, gt_info = detect_grand_total_row(df_a)
     mode, period_info = detect_per_pay_period_structure(df_b)
     agg_info = None
+    merge_events = None
     if mode == "aggregate":
-        df_c, agg_info = aggregate_by_associate(df_b)
+        if str(aggregation_strategy).lower() in ("preserve_pay_periods", "preserve"):
+            df_c, merge_events = merge_duplicate_pay_periods(df_b)
+            mode = "preserve"
+        else:
+            df_c, agg_info = aggregate_by_associate(df_b)
     else:
         df_c = df_b
     swapped = False
@@ -324,9 +434,11 @@ def run_adp_prior_payroll_sanity(content, filename="upload.xlsx", swap_net_take=
         "summary_rows_removed": summary_removed,
         "grand_total_removed": gt_info is not None,
         "grand_total_info": gt_info,
+        "aggregation_strategy": aggregation_strategy,
         "mode": mode,
         "period_info": period_info,
         "aggregation_info": agg_info,
+        "merge_events_count": len(merge_events) if merge_events is not None else 0,
         "swap_applied": swapped,
         "output_rows": len(df_c),
         "sheet_used": sheet,

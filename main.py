@@ -229,6 +229,7 @@ try:
     async def adp_prior_payroll_sanity(
         file: UploadFile = File(...),
         swap_net_take: bool = Form(True),
+        aggregation_strategy: str = Form("full_quarter"),
     ):
         try:
             content = await file.read()
@@ -236,6 +237,7 @@ try:
                 content,
                 filename=file.filename or "upload.xlsx",
                 swap_net_take=swap_net_take,
+                aggregation_strategy=aggregation_strategy,
             )
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
