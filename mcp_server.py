@@ -768,6 +768,56 @@ async def handle_list_tools() -> list[types.Tool]:
 
         # --- PAYCOM TOOLS ---
         types.Tool(
+            name="paycom_selective_census_sync",
+            description=(
+                "Updates ONLY the requested columns in a pre-filled Uzio Census Template "
+                "(.xlsm) using a fresh Paycom census export. Same shape as "
+                "adp_selective_census_sync -- selected_uzio_cols are the Uzio raw mapping "
+                "keys to overwrite, employees not present in the Paycom source are left "
+                "untouched, and the .xlsm's VBA / instruction sheets / unselected columns "
+                "all pass through unchanged.\n\n"
+                "Job Title and Work Location: pass an explicit dict {source_value: "
+                "uzio_value}, pass {} to seed automatically from the existing template, or "
+                "omit/null to skip syncing those columns.\n\n"
+                "Set discover_only=true to skip writing and just return the seed mappings + "
+                "unique source values for caller review."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "paycom_file_path": {"type": "string", "description": PATH_DESC},
+                    "paycom_file_base64": {"type": "string", "description": "Fallback: base64 Paycom census file"},
+                    "filename": {"type": "string", "description": "Optional filename hint when using base64."},
+                    "uzio_template_path": {"type": "string", "description": PATH_DESC + " (the pre-filled .xlsm)"},
+                    "uzio_template_base64": {"type": "string", "description": "Fallback: base64 Uzio template"},
+                    "selected_uzio_cols": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Keys from UZIO_RAW_MAPPING -- the columns to overwrite.",
+                    },
+                    "job_title_mapping": {
+                        "type": "object",
+                        "description": "Optional {source_job_title: uzio_job_title} dict. Pass {} to seed from template.",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "work_location_mapping": {
+                        "type": "object",
+                        "description": "Optional {source_location: uzio_location} dict. Pass {} to seed from template.",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "fix_options": {
+                        "type": "object",
+                        "description": "Optional auto-fix toggles.",
+                        "additionalProperties": {"type": "boolean"},
+                    },
+                    "discover_only": {
+                        "type": "boolean",
+                        "description": "If true, return only the seed mappings without writing the template.",
+                    },
+                },
+                "required": ["selected_uzio_cols"],
+            },
+        ),
+        types.Tool(
             name="paycom_prior_payroll_generator",
             description=(
                 "Generates a filled Uzio Prior Payroll Template (.xlsx) from 1-10 Paycom "
@@ -1137,6 +1187,40 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 "summary": summary,
                 "applied_toggles": {k: v for k, v in fix_options.items() if v},
             }
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
+        elif name == "paycom_selective_census_sync":
+            paycom_content = load_file(arguments, "paycom_file_path", "paycom_file_base64")
+            uzio_content = load_file(arguments, "uzio_template_path", "uzio_template_base64")
+            paycom_path = arguments.get("paycom_file_path")
+            filename = arguments.get("filename") or (
+                os.path.basename(paycom_path) if paycom_path else "census.xlsx"
+            )
+            selected = arguments.get("selected_uzio_cols") or []
+            job_map = arguments.get("job_title_mapping")
+            loc_map = arguments.get("work_location_mapping")
+            fix_options = arguments.get("fix_options") or {}
+
+            if arguments.get("discover_only"):
+                info = paycom_selective_discover(paycom_content, filename, uzio_content)
+                return [types.TextContent(type="text", text=json.dumps(info, indent=2, default=_json_default))]
+
+            xlsm_bytes, summary = run_paycom_selective_census_sync(
+                paycom_content, filename, uzio_content,
+                selected_uzio_cols=selected,
+                job_title_mapping=job_map,
+                work_location_mapping=loc_map,
+                fix_options=fix_options,
+            )
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            out_name = f"Uzio_Updated_Paycom_{stamp}.xlsm"
+            if not os.path.exists(AUDIT_INBOX):
+                os.makedirs(AUDIT_INBOX, exist_ok=True)
+            out_path = os.path.join(AUDIT_INBOX, out_name)
+            with open(out_path, "wb") as f:
+                f.write(xlsm_bytes)
+            payload = {"output_file": out_path, "summary": summary}
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
         elif name == "paycom_prior_payroll_generator":
