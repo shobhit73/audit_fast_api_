@@ -94,6 +94,8 @@ Exposed both via FastAPI (`/audit/adp/prior-payroll-sanity`) and MCP (`adp_prior
 
 Reverse-discovers what to configure in Uzio when migrating an ADP client. Given a sanitized ADP Prior Payroll file plus the State Tax Code master CSV, emits an Excel workbook plus a standalone Tax_Mapping CSV.
 
+The Streamlit parent has a peer module at `../apps/adp/prior_payroll_setup_helper.py` (sidebar entry "ADP - Prior Payroll Setup Helper") with identical analysis logic and a UI for interactive review. When fixing analysis bugs (subset-sum tolerance, name heuristic, tax-token map, bonus FLSA test), update both modules; they are deliberately kept in sync.
+
 Key sheets and the algorithms behind them:
 
 - **Earnings_Codes**: every distinct `REGULAR EARNINGS / OVERTIME EARNINGS / ADDITIONAL EARNINGS : XXX-NAME` column with $ total, employee count, paired hours total, and avg rate.

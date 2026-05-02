@@ -113,7 +113,7 @@ If the user mentions a specific client (e.g., "Happy Delivery"):
 ### 8.5 Prior Payroll Setup Helper (ADP)
 **Trigger**: Starting a fresh ADP prior payroll migration; need to know what to configure in Uzio (earnings, contributions, taxes, deductions) and how to map taxes/deductions correctly.
 1.  **Pre-step**: Run `adp_prior_payroll_sanity` first if the file has interleaved `Totals For Associate ID` rows. The setup helper expects a clean, one-row-per-associate-per-period file.
-2.  **Tool**: `adp_prior_payroll_setup_helper`
+2.  **Tool**: `adp_prior_payroll_setup_helper` (also available as a Streamlit tool under "ADP - Prior Payroll Setup Helper" in the parent Unified Audit Tool, with identical analysis but a UI for interactive review).
 3.  **Inputs**:
     *   `file_path` (preferred) or `file_base64` — sanitized ADP prior payroll file (.xlsx / .csv).
     *   `state_tax_master_path` — defaults to `C:\Users\shobhit.sharma\Downloads\State Tax Code.csv`. Override only if the master is elsewhere.
