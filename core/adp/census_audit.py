@@ -396,7 +396,6 @@ def run_adp_census_audit(uzio_content, adp_content):
 
     hourly_rates = [r for r in rows if is_hourly_rate_field(r["Field"]) and r["Status"] != "Employee ID Not Found in ADP"]
     high_rates = []
-        except: pass
 
     # NEW LOGIC: Hourly = 0 Hours validation (Check Uzio only)
     hourly_zero_hours = []
