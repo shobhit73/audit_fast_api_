@@ -34,6 +34,7 @@ from core.adp.misc_audits import (
 from core.adp.census_generator import run_adp_census_generation
 from core.paycom.census_generator import run_paycom_census_generation
 from core.adp.prior_payroll_sanity import run_adp_prior_payroll_sanity
+from core.adp.prior_payroll_generator import run_adp_prior_payroll_generator
 
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
@@ -516,6 +517,50 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="adp_prior_payroll_generator",
+            description=(
+                "Generates a filled Uzio Prior Payroll Template (.xlsx) from 1-10 ADP "
+                "Prior Payroll History files. Each ADP dynamic column is auto-mapped to a "
+                "Uzio target column via a fuzzy-string heuristic (handles Medicare, Social "
+                "Security, FIT, 401k, FUTA, SUI/SDI, regular/overtime/bonus, state income, "
+                "etc.). The auto-mapping can be overridden per-column with override_mapping. "
+                "Records are aggregated per (employee, pay-period-start), Net Pay is routed "
+                "to the column whose Uzio header contains 'net pay', and a validation pass "
+                "flags any employee-period where Gross - Taxes - Deductions != Net Pay.\n\n"
+                "WORKFLOW: copy both the blank Uzio template and the ADP file(s) to the "
+                "Audit Files inbox first, then pass the resulting paths. The output xlsx is "
+                "written to the same inbox and its path returned in the response."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_template_path": {"type": "string", "description": PATH_DESC},
+                    "uzio_template_base64": {"type": "string", "description": "Fallback: base64-encoded Uzio Prior Payroll Template (headers only)."},
+                    "adp_file_paths": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "List of local paths to ADP Prior Payroll History .xlsx files (max 10).",
+                    },
+                    "adp_files_base64": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Fallback: base64-encoded ADP files (max 10).",
+                    },
+                    "override_mapping": {
+                        "type": "object",
+                        "description": (
+                            "Optional {adp_column_name: uzio_column_index} override. Use a "
+                            "negative integer to force-skip a column. Auto-guessed pairs are "
+                            "kept for any ADP column not present in this object."
+                        ),
+                        "additionalProperties": {"type": "integer"},
+                    },
+                    "client_name": {
+                        "type": "string",
+                        "description": "Optional client name; used in the output filename.",
+                    },
+                },
+            },
+        ),
+        types.Tool(
             name="adp_prior_payroll_sanity",
             description=(
                 "Cleans an ADP Prior Payroll export so it can be ingested by downstream APIs. "
@@ -977,6 +1022,30 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 "summary": summary,
                 "applied_toggles": {k: v for k, v in fix_options.items() if v},
             }
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
+        elif name == "adp_prior_payroll_generator":
+            uzio_bytes = load_file(arguments, "uzio_template_path", "uzio_template_base64")
+            adp_files = load_files_list(arguments, "adp_file_paths", "adp_files_base64")
+            if not adp_files:
+                return [types.TextContent(type="text", text="Error: provide adp_file_paths or adp_files_base64.")]
+            if len(adp_files) > 10:
+                return [types.TextContent(type="text", text="Error: maximum 10 ADP files supported.")]
+            override_mapping = arguments.get("override_mapping") or None
+            client_name = (arguments.get("client_name") or "").strip()
+            xlsx_bytes, summary = run_adp_prior_payroll_generator(
+                uzio_bytes, adp_files, override_mapping=override_mapping,
+            )
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            base = (client_name + "_" if client_name else "")
+            out_name = f"Uzio_Prior_Payroll_{base}{stamp}.xlsx".replace(" ", "_")
+            if not os.path.exists(AUDIT_INBOX):
+                os.makedirs(AUDIT_INBOX, exist_ok=True)
+            out_path = os.path.join(AUDIT_INBOX, out_name)
+            with open(out_path, "wb") as f:
+                f.write(xlsx_bytes)
+            payload = {"output_file": out_path, "summary": summary}
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
         elif name == "adp_prior_payroll_sanity":
