@@ -141,6 +141,15 @@ def smart_read_df(content, filename="", sheet_name=None, header='infer', require
         return pd.DataFrame()
 
 
+def norm_col(c):
+    """Lightweight column-name normalizer: strip whitespace and inline newlines.
+    Distinct from norm_colname (which also strips bracketed suffixes / smart quotes
+    and is used for fuzzy column lookups)."""
+    if c is None:
+        return ""
+    return str(c).strip().replace("\n", " ").strip()
+
+
 def norm_colname(c: str) -> str:
     if c is None: return ""
     c = str(c).replace("\n", " ").replace("\r", " ").replace("\u00A0", " ")

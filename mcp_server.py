@@ -38,6 +38,7 @@ from core.adp.prior_payroll_generator import run_adp_prior_payroll_generator
 from core.paycom.prior_payroll_generator import run_paycom_prior_payroll_generator
 from core.adp.selective_census_sync import run_adp_selective_census_sync, discover_mappings as adp_selective_discover
 from core.paycom.selective_census_sync import run_paycom_selective_census_sync, discover_mappings as paycom_selective_discover
+from core.common.paycom_consolidated_audit import run_paycom_consolidated_audit
 
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
@@ -1020,6 +1021,34 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="paycom_consolidated_audit",
+            description=(
+                "Runs Census + Payment + Emergency contact audits in one pass against the "
+                "Uzio Master Custom Report (CSV with category labels in row 1, headers in "
+                "row 2) and a Paycom Census export (.xlsx or .csv). Produces a single "
+                "consolidated report with these sheets: Summary (per-metric counts), "
+                "Duplicate_SSN_Check, Census_Audit, Payment_Audit, Emergency_Audit, plus "
+                "anomaly extracts -- Salaried_Drivers, FLSA_Issues, Active_Missing, "
+                "Terminated_Missing, Data_Quality, High_Rate_Anomalies.\n\n"
+                "Identity matching is done by Employee ID with SSN as a fallback; the "
+                "audit honors the same canonical comparisons used by the per-vendor "
+                "audits (pay-type aware, termination-reason flexible matching, "
+                "phone/zip/SSN/date/money normalizers).\n\n"
+                "WORKFLOW: copy both files to the Audit Files inbox first, then pass the "
+                "resulting paths."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC + " (Uzio Master Custom Report CSV)"},
+                    "paycom_file_path": {"type": "string", "description": PATH_DESC + " (Paycom Census Export xlsx/csv)"},
+                    "uzio_raw_base64": {"type": "string", "description": "Fallback: base64-encoded Uzio Master CSV"},
+                    "paycom_raw_base64": {"type": "string", "description": "Fallback: base64-encoded Paycom Census Export"},
+                    "client_name": {"type": "string", "description": "Optional client name; used in the output filename."},
+                },
+            },
+        ),
+        types.Tool(
             name="selective_employee_extractor",
             description="Extracts specific employee records from a payroll/census file based on a list of IDs.",
             inputSchema={
@@ -1188,6 +1217,19 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 "applied_toggles": {k: v for k, v in fix_options.items() if v},
             }
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
+        elif name == "paycom_consolidated_audit":
+            uzio_content = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            paycom_content = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
+            paycom_path = arguments.get("paycom_file_path")
+            paycom_filename = (
+                os.path.basename(paycom_path) if paycom_path else "paycom.xlsx"
+            )
+            client_name = (arguments.get("client_name") or "").strip()
+            results = run_paycom_consolidated_audit(uzio_content, paycom_content, paycom_filename)
+            prefix = f"Paycom_Consolidated_Audit_{client_name}".rstrip("_") if client_name else "Paycom_Consolidated_Audit"
+            summary = save_results_to_excel(results, prefix)
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_selective_census_sync":
             paycom_content = load_file(arguments, "paycom_file_path", "paycom_file_base64")
