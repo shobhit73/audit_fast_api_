@@ -666,3 +666,242 @@ def resolve_uzio_template_path():
         if os.path.isfile(p):
             return p
     return None
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Selective Census Sync helpers
+# Ported from the Streamlit parent's utils/audit_utils.py to support the
+# selective census sync MCP tools (apps/{adp,paycom}/census_generator.py's
+# render_selective_census_generator entry points).
+# ────────────────────────────────────────────────────────────────────────────
+
+def norm_key_series(s: pd.Series) -> pd.Series:
+    """Normalize a Series of keys (like Employee IDs) using norm_id."""
+    return s.apply(norm_id)
+
+
+def read_uzio_template_df(file):
+    """Read the 'Employee Details' sheet of a Uzio template .xlsm into a DataFrame.
+    The Uzio raw template has a 3-row preamble before the column-header row at index 3.
+    """
+    try:
+        df_template = pd.read_excel(file, sheet_name='Employee Details', header=3, dtype=str)
+        df_template.columns = [str(c).replace("\n", " ").replace("\r", " ").strip() for c in df_template.columns]
+        return df_template
+    except Exception:
+        return None
+
+
+def extract_mappings_from_uzio(df_source, df_template, vendor_map):
+    """Extract Job Title and Work Location mappings from a pre-filled Uzio template.
+
+    Matches employees between source and template using Employee ID, then for each
+    matched pair records (source_value -> template_value). Returns
+    (job_mappings, loc_mappings) dicts so the caller can seed the editable mapping UI.
+    """
+    job_mappings, loc_mappings = {}, {}
+
+    src_id_col = vendor_map.get('Employee ID')
+    src_job_col = vendor_map.get('Job Title')
+    src_loc_col = vendor_map.get('Work Location')
+
+    if not src_id_col or src_id_col not in df_source.columns:
+        return job_mappings, loc_mappings
+
+    UZIO_ID, UZIO_JOB, UZIO_LOC = 'Employee ID', 'Job Title', 'Work Location'
+    if UZIO_ID not in df_template.columns:
+        if 'Employee ID*' in df_template.columns:
+            UZIO_ID = 'Employee ID*'
+        else:
+            return job_mappings, loc_mappings
+    if UZIO_JOB not in df_template.columns or UZIO_LOC not in df_template.columns:
+        return job_mappings, loc_mappings
+
+    uzio_lookup = {}
+    for _, t_row in df_template.iterrows():
+        tid = str(t_row.get(UZIO_ID, "")).strip().replace(".0", "")
+        if tid:
+            uzio_lookup[tid] = {
+                'job': str(t_row.get(UZIO_JOB, "")).strip(),
+                'loc': str(t_row.get(UZIO_LOC, "")).strip(),
+            }
+
+    for _, s_row in df_source.iterrows():
+        sid = str(s_row.get(src_id_col, "")).strip().replace(".0", "")
+        if not sid or sid not in uzio_lookup:
+            continue
+        u_job = uzio_lookup[sid]['job']
+        u_loc = uzio_lookup[sid]['loc']
+        s_job = str(s_row.get(src_job_col, "")).strip() if src_job_col else ""
+        s_loc = str(s_row.get(src_loc_col, "")).strip() if src_loc_col else ""
+        if s_job and u_job and u_job.lower() not in ("nan", ""):
+            job_mappings.setdefault(s_job, u_job)
+        if s_loc and u_loc and u_loc.lower() not in ("nan", ""):
+            loc_mappings.setdefault(s_loc, u_loc)
+    return job_mappings, loc_mappings
+
+
+def selective_update_uzio(df_source, df_template, selected_uzio_cols, vendor_field_map, fix_options=None):
+    """Update specific columns in df_template using values from df_source, matched
+    by Employee ID. Only employees present in df_source are touched; everyone else
+    is left unchanged. Returns (updated_template_df, summary_str, changes_df).
+    """
+    fix_options = fix_options or {}
+    emp_id_col_source = vendor_field_map.get('Employee ID')
+    emp_id_col_template = 'Employee ID*' if 'Employee ID*' in df_template.columns else 'Employee ID'
+
+    if not emp_id_col_source or emp_id_col_source not in df_source.columns:
+        return df_template, "Error: Source 'Employee ID' column not found.", pd.DataFrame()
+
+    df_source_clean = df_source.copy()
+    df_source_clean[emp_id_col_source] = norm_key_series(df_source_clean[emp_id_col_source])
+    df_source_clean = df_source_clean.drop_duplicates(subset=[emp_id_col_source], keep='first')
+    source_lookup = df_source_clean.set_index(emp_id_col_source).to_dict('index')
+
+    updated_count = 0
+    df_updated = df_template.copy()
+    change_details = []
+
+    DATE_FIELDS = ('Hire Date', 'Original Hire Date', 'Termination Date', 'DOB')
+
+    for idx, row in df_updated.iterrows():
+        eid = norm_key_series(pd.Series([row.get(emp_id_col_template, "")])).iloc[0]
+        if eid not in source_lookup:
+            continue
+        source_row_data = source_lookup[eid]
+
+        for uzio_col in selected_uzio_cols:
+            std_name = UZIO_RAW_MAPPING.get(uzio_col)
+            if not std_name:
+                continue
+            vendor_col = vendor_field_map.get(std_name)
+            if not vendor_col or vendor_col not in df_source.columns:
+                continue
+            val = source_row_data.get(vendor_col)
+            val_str = str(val).strip().lower() if pd.notna(val) else ""
+
+            formatted_val = ""
+            if val_str and val_str != "nan":
+                if std_name == 'Middle Initial':
+                    formatted_val = str(val).strip()[0]
+                elif std_name in DATE_FIELDS:
+                    try:
+                        dt = pd.to_datetime(str(val).strip(), errors='coerce')
+                        formatted_val = dt.strftime('%d/%m/%Y') if not pd.isna(dt) else str(val).strip()
+                    except Exception:
+                        formatted_val = str(val).strip()
+                elif std_name == 'License Expiration Date':
+                    v_str = str(val).strip()
+                    if fix_options.get('fix_license', False):
+                        if '00/00/0000' in v_str or v_str in ('0', '00', '0000'):
+                            formatted_val = ""
+                        else:
+                            try:
+                                dt = pd.to_datetime(v_str, errors='coerce')
+                                formatted_val = dt.strftime('%m/%d/%Y') if not pd.isna(dt) else ""
+                            except Exception:
+                                formatted_val = ""
+                    else:
+                        formatted_val = v_str
+                elif std_name == 'SSN':
+                    formatted_val = str(val).replace("-", "").strip()
+                elif std_name == 'Gender':
+                    g_str = str(val).lower()
+                    if g_str.startswith('m'): formatted_val = "Male"
+                    elif g_str.startswith('f'): formatted_val = "Female"
+                elif std_name == 'Employment Status':
+                    s = str(val).lower()
+                    if fix_options.get('fix_status', False):
+                        if 'not hired' in s: formatted_val = 'EXCLUDE'
+                        elif 'inactive' in s or 'term' in s: formatted_val = 'TERMINATED'
+                        elif 'active' in s or 'leave' in s: formatted_val = 'ACTIVE'
+                        else: formatted_val = str(val).strip().upper()
+                    else:
+                        formatted_val = str(val).strip().upper()
+                elif std_name in ('Zip', 'Mailing Zip'):
+                    z_clean = re.sub(r'\D', '', str(val).strip())
+                    formatted_val = z_clean.zfill(5)[:5] if z_clean else ""
+                elif std_name == 'Employment Type':
+                    et_str = str(val).lower()
+                    if fix_options.get('fix_type', False):
+                        if 'full' in et_str: formatted_val = 'Full Time'
+                        elif 'part' in et_str: formatted_val = 'Part Time'
+                        elif 'season' in et_str: formatted_val = 'Seasonal'
+                        elif 'other' in et_str: formatted_val = 'Other'
+                        elif 'intern' in et_str: formatted_val = 'Part Time'
+                        else: formatted_val = str(val).strip()
+                    else:
+                        formatted_val = str(val).strip()
+                elif std_name == 'Termination Reason':
+                    tr_str = str(val).strip().lower()
+                    if "involuntary" in tr_str or "invluntary" in tr_str:
+                        formatted_val = "Involuntary Termination of Employment"
+                    elif "voluntary" in tr_str or "quit" in tr_str:
+                        formatted_val = "Voluntary Termination of Employment"
+                    elif "death" in tr_str: formatted_val = "Death"
+                    elif "retire" in tr_str: formatted_val = "Retirement"
+                    elif "disability" in tr_str: formatted_val = "Permanent Disability"
+                    elif "transfer" in tr_str: formatted_val = "Transfer"
+                    else: formatted_val = "Other"
+                else:
+                    formatted_val = str(val).strip()
+            else:
+                if std_name == 'Job Title' and fix_options.get('fix_job_title', False):
+                    dept_col = vendor_field_map.get('Department')
+                    if dept_col:
+                        dept_val = source_row_data.get(dept_col)
+                        if pd.notna(dept_val) and str(dept_val).strip().lower() != "nan":
+                            formatted_val = str(dept_val).strip()
+                # else leave formatted_val as ""
+
+            old_val = row.get(uzio_col, "")
+            if str(formatted_val) != str(old_val):
+                df_updated.at[idx, uzio_col] = formatted_val
+                change_details.append({
+                    'Employee ID': eid,
+                    'Column': uzio_col,
+                    'From': old_val,
+                    'To': formatted_val,
+                })
+                updated_count += 1
+
+        # Email fallback (only if Work Email is one of the selected columns and fix_emails on)
+        if fix_options.get('fix_emails', False):
+            work_email_col = next((c for c in selected_uzio_cols if UZIO_RAW_MAPPING.get(c) == 'Work Email'), None)
+            if work_email_col:
+                current = df_updated.at[idx, work_email_col]
+                if pd.isna(current) or str(current).strip() == "":
+                    pers_col = next((c for c in df_source.columns if norm_colname(c).casefold() == 'personal email'), None)
+                    if not pers_col:
+                        pers_col = next((c for c in df_source.columns if 'personal' in c.lower() and 'email' in c.lower()), None)
+                    if pers_col:
+                        fallback = str(source_row_data.get(pers_col, "")).strip()
+                        if fallback:
+                            df_updated.at[idx, work_email_col] = fallback
+                            change_details.append({
+                                'Employee ID': eid,
+                                'Column': work_email_col,
+                                'From': '(blank)',
+                                'To': fallback,
+                            })
+                            updated_count += 1
+
+    # Post-processing license rules
+    if fix_options.get('fix_license', False):
+        lic_num_col = 'License Number*'
+        lic_exp_col = 'License Expiration Date'
+        if lic_exp_col in df_updated.columns:
+            bad_mask = df_updated[lic_exp_col].astype(str).str.strip().isin(
+                ['00/00/0000', '0', '00', '0000', 'nan', 'NaT', '']
+            )
+            df_updated.loc[bad_mask, lic_exp_col] = ""
+            if lic_num_col in df_updated.columns:
+                no_lic_mask = (
+                    df_updated[lic_num_col].isna()
+                    | (df_updated[lic_num_col].astype(str).str.strip() == "")
+                    | (df_updated[lic_num_col].astype(str).str.strip() == 'nan')
+                )
+                df_updated.loc[no_lic_mask, lic_exp_col] = ""
+
+    summary = f"Updated {updated_count} cells across {len({c['Employee ID'] for c in change_details})} employees."
+    return df_updated, summary, pd.DataFrame(change_details)

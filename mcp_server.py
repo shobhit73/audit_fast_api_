@@ -36,6 +36,7 @@ from core.paycom.census_generator import run_paycom_census_generation
 from core.adp.prior_payroll_sanity import run_adp_prior_payroll_sanity
 from core.adp.prior_payroll_generator import run_adp_prior_payroll_generator
 from core.paycom.prior_payroll_generator import run_paycom_prior_payroll_generator
+from core.adp.selective_census_sync import run_adp_selective_census_sync, discover_mappings as adp_selective_discover
 
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
@@ -515,6 +516,62 @@ async def handle_list_tools() -> list[types.Tool]:
                     "replace_gender_col": {"type": "boolean"},
                     "sort_by_manager": {"type": "boolean"},
                 },
+            },
+        ),
+        types.Tool(
+            name="adp_selective_census_sync",
+            description=(
+                "Updates ONLY the requested columns in a pre-filled Uzio Census Template "
+                "(.xlsm) using a fresh ADP census export. Employees not present in the ADP "
+                "source are left untouched; everything outside selected_uzio_cols is also "
+                "preserved exactly as it was in the template (the .xlsm's VBA, instructions, "
+                "and other sheets pass through unchanged).\n\n"
+                "Selected columns must be keys of the Uzio raw mapping (e.g. 'Employee ID*', "
+                "'Employee First Name*', 'Date of Hire*', 'Standard Hours*', 'Primary "
+                "Address: Zip / Postal Code', etc.). Job Title and Work Location are special: "
+                "if the caller wants those synced too, pass an explicit job_title_mapping / "
+                "work_location_mapping dict (source_value -> Uzio_value). Pass {} to seed "
+                "automatically from whatever mapping is already present in the template "
+                "(extract_mappings_from_uzio walks the existing template to learn the "
+                "convention). Pass null/omit to skip syncing those columns.\n\n"
+                "fix_options carries the same toggle keys as adp_census_sanity (fix_emails, "
+                "fix_license, fix_status, fix_type, fix_job_title, ...).\n\n"
+                "Set discover_only=true to skip writing and instead return the seed "
+                "mappings + unique source values so the caller can review before applying."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "adp_file_path": {"type": "string", "description": PATH_DESC},
+                    "adp_file_base64": {"type": "string", "description": "Fallback: base64 ADP census file"},
+                    "filename": {"type": "string", "description": "Optional filename hint when using base64."},
+                    "uzio_template_path": {"type": "string", "description": PATH_DESC + " (the pre-filled .xlsm)"},
+                    "uzio_template_base64": {"type": "string", "description": "Fallback: base64 Uzio template"},
+                    "selected_uzio_cols": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Keys from UZIO_RAW_MAPPING -- the columns to overwrite (e.g. 'Employee SSN', 'Date of Hire*').",
+                    },
+                    "job_title_mapping": {
+                        "type": "object",
+                        "description": "Optional {source_job_title: uzio_job_title} dict. Pass {} to seed from template.",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "work_location_mapping": {
+                        "type": "object",
+                        "description": "Optional {source_location: uzio_location} dict. Pass {} to seed from template.",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "fix_options": {
+                        "type": "object",
+                        "description": "Optional auto-fix toggles (fix_emails, fix_license, fix_status, fix_type, fix_job_title, ...).",
+                        "additionalProperties": {"type": "boolean"},
+                    },
+                    "discover_only": {
+                        "type": "boolean",
+                        "description": "If true, return only the seed mappings without writing the template.",
+                    },
+                },
+                "required": ["selected_uzio_cols"],
             },
         ),
         types.Tool(
@@ -1090,6 +1147,40 @@ async def handle_call_tool(name: str, arguments: dict | None):
             out_path = os.path.join(AUDIT_INBOX, out_name)
             with open(out_path, "wb") as f:
                 f.write(xlsx_bytes)
+            payload = {"output_file": out_path, "summary": summary}
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
+        elif name == "adp_selective_census_sync":
+            adp_content = load_file(arguments, "adp_file_path", "adp_file_base64")
+            uzio_content = load_file(arguments, "uzio_template_path", "uzio_template_base64")
+            adp_path = arguments.get("adp_file_path")
+            filename = arguments.get("filename") or (
+                os.path.basename(adp_path) if adp_path else "census.xlsx"
+            )
+            selected = arguments.get("selected_uzio_cols") or []
+            job_map = arguments.get("job_title_mapping")
+            loc_map = arguments.get("work_location_mapping")
+            fix_options = arguments.get("fix_options") or {}
+
+            if arguments.get("discover_only"):
+                info = adp_selective_discover(adp_content, filename, uzio_content)
+                return [types.TextContent(type="text", text=json.dumps(info, indent=2, default=_json_default))]
+
+            xlsm_bytes, summary = run_adp_selective_census_sync(
+                adp_content, filename, uzio_content,
+                selected_uzio_cols=selected,
+                job_title_mapping=job_map,
+                work_location_mapping=loc_map,
+                fix_options=fix_options,
+            )
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            out_name = f"Uzio_Updated_ADP_{stamp}.xlsm"
+            if not os.path.exists(AUDIT_INBOX):
+                os.makedirs(AUDIT_INBOX, exist_ok=True)
+            out_path = os.path.join(AUDIT_INBOX, out_name)
+            with open(out_path, "wb") as f:
+                f.write(xlsm_bytes)
             payload = {"output_file": out_path, "summary": summary}
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
