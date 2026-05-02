@@ -33,6 +33,7 @@ from core.adp.misc_audits import (
 )
 from core.adp.census_generator import run_adp_census_generation
 from core.paycom.census_generator import run_paycom_census_generation
+from core.adp.prior_payroll_sanity import run_adp_prior_payroll_sanity
 
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
@@ -515,6 +516,40 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="adp_prior_payroll_sanity",
+            description=(
+                "Cleans an ADP Prior Payroll export so it can be ingested by downstream APIs. "
+                "Three independent fix-ups are applied as needed:\n"
+                "  1. Drops interleaved 'Totals For Associate ID XYZ:' summary rows.\n"
+                "  2. Detects and removes the bottom-of-file grand-total row where the last "
+                "employee's ID got bled into the totals row.\n"
+                "  3. Auto-detects per-pay-period exports (multiple rows per associate) and "
+                "aggregates to one row per associate -- money/hours SUMmed, period dates "
+                "MIN/MAX'd, identity columns kept as-is. Same-pay-date duplicates (real "
+                "distinct paychecks in ADP) are also folded in by the SUM aggregation, which "
+                "is correct for ADP.\n\n"
+                "Optional swap: NET PAY <-> TAKE HOME values can be exchanged (default ON) "
+                "because the Carvan-style API maps them reversed. Column headers are NEVER "
+                "renamed -- only the data is swapped.\n\n"
+                "Output: a CSV file with the input's exact column headers and column order, "
+                "saved to the Audit Files inbox. Input accepts .xlsx / .xls / .csv. ADP money "
+                "cells are stored as =ROUND(x, 2.0) Excel formulas; this tool evaluates them "
+                "with openpyxl + a small formula parser, so values come through correctly."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                    "file_base64": {"type": "string", "description": "Fallback: base64 encoded ADP Prior Payroll file"},
+                    "filename": {"type": "string", "description": "Optional filename hint, used for extension dispatch when file_base64 is supplied."},
+                    "swap_net_take": {
+                        "type": "boolean",
+                        "description": "Swap NET PAY <-> TAKE HOME values (the API expects them reversed). Default true.",
+                    },
+                },
+            },
+        ),
+        types.Tool(
             name="adp_census_generator",
             description=(
                 "Generates a Uzio Census Template (.xlsm) from an ADP Census export. "
@@ -941,6 +976,32 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 "output_file": out_path,
                 "summary": summary,
                 "applied_toggles": {k: v for k, v in fix_options.items() if v},
+            }
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
+        elif name == "adp_prior_payroll_sanity":
+            content = load_file(arguments, "file_path", "file_base64")
+            file_path_arg = arguments.get("file_path")
+            filename = arguments.get("filename") or (
+                os.path.basename(file_path_arg) if file_path_arg else "upload.xlsx"
+            )
+            swap_net_take = bool(arguments.get("swap_net_take", True))
+            csv_bytes, summary = run_adp_prior_payroll_sanity(
+                content, filename=filename, swap_net_take=swap_net_take
+            )
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            base = os.path.splitext(filename)[0] or "ADP_Prior_Payroll"
+            out_name = f"{base}_Sanity_Cleaned_{stamp}.csv"
+            if not os.path.exists(AUDIT_INBOX):
+                os.makedirs(AUDIT_INBOX, exist_ok=True)
+            out_path = os.path.join(AUDIT_INBOX, out_name)
+            with open(out_path, "wb") as f:
+                f.write(csv_bytes)
+            payload = {
+                "output_file": out_path,
+                "summary": summary,
+                "swap_applied": summary.get("swap_applied", False),
             }
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 

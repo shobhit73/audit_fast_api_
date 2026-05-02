@@ -223,6 +223,31 @@ try:
             )
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
+    from core.adp.prior_payroll_sanity import run_adp_prior_payroll_sanity
+
+    @app.post("/audit/adp/prior-payroll-sanity")
+    async def adp_prior_payroll_sanity(
+        file: UploadFile = File(...),
+        swap_net_take: bool = Form(True),
+    ):
+        try:
+            content = await file.read()
+            csv_bytes, summary = run_adp_prior_payroll_sanity(
+                content,
+                filename=file.filename or "upload.xlsx",
+                swap_net_take=swap_net_take,
+            )
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            base = os.path.splitext(file.filename or "ADP_Prior_Payroll")[0]
+            headers = {
+                "Content-Disposition": f'attachment; filename="{base}_Sanity_Cleaned_{stamp}.csv"',
+                "X-Sanity-Mode": str(summary.get("mode", "none")),
+                "X-Swap-Applied": str(summary.get("swap_applied", False)).lower(),
+            }
+            return StreamingResponse(io.BytesIO(csv_bytes), media_type="text/csv", headers=headers)
+        except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
     from core.misc_audits import run_adp_emergency_audit, run_paycom_emergency_audit, run_adp_license_audit, run_adp_timeoff_audit, run_paycom_timeoff_audit, run_paycom_payment_audit
 
     @app.post("/audit/paycom/payment")
