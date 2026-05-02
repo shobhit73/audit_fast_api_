@@ -396,11 +396,33 @@ def run_adp_census_audit(uzio_content, adp_content):
 
     hourly_rates = [r for r in rows if is_hourly_rate_field(r["Field"]) and r["Status"] != "Employee ID Not Found in ADP"]
     high_rates = []
-    for r in hourly_rates:
-        try:
-            val = float(str(r["ADP Value"]).replace("$","").replace(",",""))
-            if val > 60: high_rates.append({**r, "Rate": val})
         except: pass
+
+    # NEW LOGIC: Hourly = 0 Hours validation (Check Uzio only)
+    hourly_zero_hours = []
+    for uz_id in sorted(uzio_keys):
+        uz_pay_raw = str(norm_blank(uzio_idx.at[uz_id, 'Pay Type']) or "")
+        emp_pay_bucket = paytype_bucket(normalize_paytype_text(uz_pay_raw))
+        if emp_pay_bucket == "hourly":
+            wh_raw = safe_val(uzio_idx, uz_id, 'Working Hours')
+            try:
+                # Handle cases where it might be empty string
+                wh_val = float(str(wh_raw).replace(",", "").strip()) if str(wh_raw).strip() else 0.0
+            except Exception:
+                wh_val = 0.0
+            
+            # Flag if Working Hours is greater than 0
+            if wh_val > 0:
+                fname = str(norm_blank(uzio_idx.at[uz_id, 'First Name']) or "")
+                lname = str(norm_blank(uzio_idx.at[uz_id, 'Last Name']) or "")
+                emp_name = f"{fname} {lname}".strip()
+                hourly_zero_hours.append({
+                    "Employee ID": uz_id,
+                    "Employee Name": emp_name,
+                    "Pay Type (Uzio)": uz_pay_raw,
+                    "Working Hours (Uzio)": wh_raw,
+                    "Issue": f"Hourly employee has {wh_raw} working hours. Must be 0."
+                })
 
     mismatches = [r for r in rows if r["Status"] != "Data Match"]
     
@@ -418,5 +440,6 @@ def run_adp_census_audit(uzio_content, adp_content):
         "Terminated_Missing_In_Uzio": terminated_missing_rows,
         "Duplicate_SSN_Check": detect_duplicate_ssns(adp, ssn_col=next((c for c in adp.columns if "Tax ID" in c or "SSN" in c), ADP_KEY)).to_dict(orient="records"),
         "Salaried_Driver_Exceptions": df_salaried_drivers.to_dict(orient="records"),
-        "High_Hourly_Rate_Anomalies": high_rates
+        "High_Hourly_Rate_Anomalies": high_rates,
+        "Hourly_Zero_Hours_Exceptions": hourly_zero_hours
     }

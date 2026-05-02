@@ -211,8 +211,8 @@ def run_paycom_census_audit(uzio_content, paycom_content):
 
     df_detail = pd.DataFrame(rows)
     
-    # FLSA, Salaried Drivers, DQ, High Hourly
-    flsa_issues, dq_issues, active_missing, term_missing, salaried_drivers, high_rate = [], [], [], [], [], []
+    # FLSA, Salaried Drivers, DQ, High Hourly, Hourly Zero Hours
+    flsa_issues, dq_issues, active_missing, term_missing, salaried_drivers, high_rate, hourly_zero_hours = [], [], [], [], [], [], []
     
     # Logic for specialized sheets
     for uz_id, u_i in uzio_idx_map.items():
@@ -221,6 +221,24 @@ def run_paycom_census_audit(uzio_content, paycom_content):
         flsa = normalize_space_and_case(safe_val(uzio, u_i, 'FLSA Classification'))
         if (pt == "hourly" and "exempt" in flsa and "non" not in flsa) or (pt == "salaried" and "non" in flsa):
             flsa_issues.append({"Employee ID": uz_id, "Issue": f"Inconsistent Uzio FLSA ({flsa}) for Pay Type ({pt})"})
+            
+        # Hourly = 0 Hours validation (Check Uzio only)
+        if pt == "hourly":
+            wh_raw = safe_val(uzio, u_i, 'Working Hours')
+            try:
+                wh_val = float(str(wh_raw).replace(",", "").strip()) if str(wh_raw).strip() else 0.0
+            except Exception:
+                wh_val = 0.0
+            
+            if wh_val > 0:
+                emp_name = f"{safe_val(uzio, u_i, 'First Name')} {safe_val(uzio, u_i, 'Last Name')}".strip()
+                hourly_zero_hours.append({
+                    "Employee ID": uz_id,
+                    "Employee Name": emp_name,
+                    "Pay Type (Uzio)": safe_val(uzio, u_i, 'Pay Type'),
+                    "Working Hours (Uzio)": wh_raw,
+                    "Issue": f"Hourly employee has {wh_raw} working hours. Must be 0."
+                })
             
     for pc_id, p_i in paycom_idx_map.items():
         # DQ
@@ -279,5 +297,6 @@ def run_paycom_census_audit(uzio_content, paycom_content):
         "Terminated_Missing_In_Uzio": term_missing,
         "Duplicate_SSN_Check": dupe_ssn_rows,
         "Salaried_Driver_Exceptions": salaried_drivers,
-        "High_Hourly_Rate_Anomalies": high_rate
+        "High_Hourly_Rate_Anomalies": high_rate,
+        "Hourly_Zero_Hours_Exceptions": hourly_zero_hours
     }
