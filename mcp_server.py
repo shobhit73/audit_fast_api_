@@ -35,6 +35,7 @@ from core.adp.census_generator import run_adp_census_generation
 from core.paycom.census_generator import run_paycom_census_generation
 from core.adp.prior_payroll_sanity import run_adp_prior_payroll_sanity
 from core.adp.prior_payroll_generator import run_adp_prior_payroll_generator
+from core.paycom.prior_payroll_generator import run_paycom_prior_payroll_generator
 
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
@@ -697,6 +698,50 @@ async def handle_list_tools() -> list[types.Tool]:
 
         # --- PAYCOM TOOLS ---
         types.Tool(
+            name="paycom_prior_payroll_generator",
+            description=(
+                "Generates a filled Uzio Prior Payroll Template (.xlsx) from 1-10 Paycom "
+                "Prior Payroll files (long format with Type Code / Type Description / Code "
+                "Description / Amount). Each (type_code, type_description) pair is auto-"
+                "mapped to a Uzio target column via a fuzzy-string heuristic. "
+                "'Net Pay Distribution' rows are auto-summed into the Uzio 'Net Pay' column; "
+                "'Employee Benefits' rows are skipped. Pay-period dates are pulled from the "
+                "filename pattern 'Pay Period MMDDYYYY MMDDYYYY Pay Date MMDDYYYY'.\n\n"
+                "Records are aggregated per (employee, pay-period); a validation pass flags "
+                "any employee-period where Gross - Taxes - Deductions != Net Pay. The auto-"
+                "mapping can be overridden per-pair with override_mapping (key format "
+                "'type_code|type_description', value is the Uzio column index, or a "
+                "negative integer to skip).\n\n"
+                "WORKFLOW: copy both the blank Uzio template and the Paycom file(s) to the "
+                "Audit Files inbox first, then pass the resulting paths."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_template_path": {"type": "string", "description": PATH_DESC},
+                    "uzio_template_base64": {"type": "string", "description": "Fallback: base64-encoded Uzio Prior Payroll Template (headers only)."},
+                    "paycom_file_paths": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Local paths to Paycom Prior Payroll .xlsx files (max 10).",
+                    },
+                    "paycom_files_base64": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Fallback: base64-encoded Paycom files (max 10).",
+                    },
+                    "override_mapping": {
+                        "type": "object",
+                        "description": (
+                            "Optional {'type_code|type_description': uzio_col_idx} override. "
+                            "Use a negative integer to force-skip a pair. Auto-guessed pairs "
+                            "are kept for any (tc, td) not present in this object."
+                        ),
+                        "additionalProperties": {"type": "integer"},
+                    },
+                    "client_name": {"type": "string", "description": "Optional client name; used in the output filename."},
+                },
+            },
+        ),
+        types.Tool(
             name="paycom_deduction_analyzer",
             description="Analyzes Paycom deductions and consolidation plans.",
             inputSchema={
@@ -1022,6 +1067,30 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 "summary": summary,
                 "applied_toggles": {k: v for k, v in fix_options.items() if v},
             }
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
+        elif name == "paycom_prior_payroll_generator":
+            uzio_bytes = load_file(arguments, "uzio_template_path", "uzio_template_base64")
+            paycom_files = load_files_list(arguments, "paycom_file_paths", "paycom_files_base64")
+            if not paycom_files:
+                return [types.TextContent(type="text", text="Error: provide paycom_file_paths or paycom_files_base64.")]
+            if len(paycom_files) > 10:
+                return [types.TextContent(type="text", text="Error: maximum 10 Paycom files supported.")]
+            override_mapping = arguments.get("override_mapping") or None
+            client_name = (arguments.get("client_name") or "").strip()
+            xlsx_bytes, summary = run_paycom_prior_payroll_generator(
+                uzio_bytes, paycom_files, override_mapping=override_mapping,
+            )
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            base = (client_name + "_" if client_name else "")
+            out_name = f"Uzio_Prior_Payroll_Paycom_{base}{stamp}.xlsx".replace(" ", "_")
+            if not os.path.exists(AUDIT_INBOX):
+                os.makedirs(AUDIT_INBOX, exist_ok=True)
+            out_path = os.path.join(AUDIT_INBOX, out_name)
+            with open(out_path, "wb") as f:
+                f.write(xlsx_bytes)
+            payload = {"output_file": out_path, "summary": summary}
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
         elif name == "adp_prior_payroll_generator":
