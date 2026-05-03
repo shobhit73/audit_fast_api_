@@ -41,6 +41,7 @@ from core.adp.selective_census_sync import run_adp_selective_census_sync, discov
 from core.paycom.selective_census_sync import run_paycom_selective_census_sync, discover_mappings as paycom_selective_discover
 from core.common.paycom_consolidated_audit import run_paycom_consolidated_audit
 from core.adp.prior_payroll_setup_helper import run_adp_prior_payroll_setup_helper, build_simplified_xlsx_bytes as _setup_helper_xlsx
+from utils.file_shape_guards import require_vendor
 
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
@@ -337,10 +338,12 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="list_audit_files",
             description=(
-                "Lists all files available in a specified directory or the default audit drop-folder. "
-                "Always call this first before running any audit to discover "
-                "which files the user has available. Returns file names, "
-                "full paths, sizes, and last-modified timestamps."
+                "[VENDOR-AGNOSTIC] [INPUT: optional directory path; defaults to "
+                "C:/Users/shobhit.sharma/Desktop/Audit Files]\n"
+                "Lists all files in the audit drop-folder (or any user-specified directory) "
+                "with full paths, sizes, and last-modified timestamps. ALWAYS call this first "
+                "before running any audit to discover which files the user has available - "
+                "do not guess at filenames."
             ),
             inputSchema={
                 "type": "object", 
@@ -355,8 +358,11 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="copy_to_audit_inbox",
             description=(
-                "Copies a file from any local directory (e.g., Downloads) to the 'Audit Files' inbox. "
-                "Use this to satisfy the SOP requirement of moving files locally before analysis."
+                "[VENDOR-AGNOSTIC] [INPUT: source_path = any local file path]\n"
+                "Copies a file from any local directory (e.g. Downloads, a client folder) "
+                "into the 'Audit Files' inbox so audit tools can find it consistently. "
+                "Optional but recommended - audit tools accept any local path, but consolidating "
+                "in the inbox keeps inputs and outputs together."
             ),
             inputSchema={
                 "type": "object", 
@@ -448,7 +454,13 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="adp_total_comparison",
             description=(
-                "Performs a complete payroll total comparison between ADP and Uzio reports. "
+                "[VENDOR: ADP + UZIO (two-file audit)] [adp_file_paths: 1+ ADP Prior Payroll "
+                "Register Reports] [uzio_file_path: UZIO Master / Custom Report]\n"
+                "[DO NOT confuse the slots - ADP file goes in adp_file_paths, UZIO file goes "
+                "in uzio_file_path. Wrong placement will produce nonsense matches.]\n\n"
+                "Performs a complete payroll total comparison between ADP and Uzio reports, "
+                "producing 6 sheets: Full Comparison, Mismatches Only, Employee Mismatches, "
+                "Duplicate Pay Periods, Pay Stub Counts, and Tax Rate Verification. "
                 "HINT: Always call 'list_audit_files' first to identify the correct paths."
             ),
             inputSchema={
@@ -471,7 +483,13 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="adp_census_audit",
-            description="Audits employee census data between Uzio and ADP to find mismatches in names, emails, etc.",
+            description=(
+                "[VENDOR: ADP + UZIO (two-file audit)] [uzio_file_path: UZIO Census Custom Report] "
+                "[adp_file_path: ADP Census export]\n"
+                "[DO NOT swap the slots - mixing them produces nonsense.]\n"
+                "Audits employee census data between Uzio and ADP to find mismatches in names, "
+                "emails, addresses, hire/term dates, status, FLSA, etc."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -484,7 +502,12 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="adp_deduction_audit",
-            description="Compares deduction amounts between Uzio and ADP reports.",
+            description=(
+                "[VENDOR: ADP + UZIO (two-file audit)] [uzio_file_path: UZIO Deduction Report] "
+                "[adp_file_path: ADP Deduction Register / Prior Payroll]\n"
+                "[REQUIRED: mapping_json - JSON object mapping ADP deduction codes to UZIO codes]\n"
+                "Compares deduction amounts between Uzio and ADP reports per employee, per code."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -499,7 +522,11 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="adp_payment_audit",
-            description="Audits payment methods and amounts between Uzio and ADP.",
+            description=(
+                "[VENDOR: ADP + UZIO (two-file audit)] [uzio_file_path: UZIO Payment Report] "
+                "[adp_file_path: ADP Payment Register / Direct Deposit Report]\n"
+                "Audits payment methods (direct deposit / check) and amounts between Uzio and ADP."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -512,7 +539,12 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="adp_withholding_audit",
-            description="Audits tax withholding settings between Uzio and ADP.",
+            description=(
+                "[VENDOR: ADP + UZIO (two-file audit)] [uzio_file_path: UZIO Withholding Report] "
+                "[adp_file_path: ADP Withholding / W-4 Report]\n"
+                "Audits federal + state tax withholding settings (filing status, allowances, "
+                "extra withholding, exemptions) between Uzio and ADP per employee."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -526,6 +558,10 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="adp_census_sanity",
             description=(
+                "[VENDOR: ADP only] [INPUT: ADP Census export (.xlsx/.csv) with columns "
+                "Associate ID, Legal First Name, FLSA Description, etc.]\n"
+                "[DO NOT USE FOR: UZIO Master / UZIO Census Template / Paycom Census - the "
+                "runtime guard will refuse those. For Paycom census use 'paycom_census_sanity'.]\n\n"
                 "Applies opt-in auto-corrections to an ADP Census export. "
                 "MANDATORY: For stability, always use copy_to_audit_inbox first and then use 'file_path'. "
                 "Do NOT use 'file_base64' for files > 1MB."
@@ -658,6 +694,9 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="adp_prior_payroll_sanity",
             description=(
+                "[VENDOR: ADP only] [INPUT: ADP Prior Payroll Register Report (.xlsx/.csv)]\n"
+                "[DO NOT USE FOR: UZIO Master / UZIO Custom Report / Paycom Prior Payroll - "
+                "the runtime guard will refuse those with a clear error.]\n\n"
                 "Cleans an ADP Prior Payroll export so it can be ingested by downstream APIs. "
                 "Three independent fix-ups are applied as needed:\n"
                 "  1. Drops interleaved 'Totals For Associate ID XYZ:' summary rows.\n"
@@ -713,6 +752,10 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="adp_prior_payroll_setup_helper",
             description=(
+                "[VENDOR: ADP only] [INPUT: SANITIZED ADP Prior Payroll file (.xlsx/.csv) -- "
+                "run adp_prior_payroll_sanity first if the file has interleaved totals or "
+                "per-pay-period rows] [SECONDARY INPUT: State Tax Code master CSV]\n"
+                "[DO NOT USE FOR: UZIO files / Paycom files - the runtime guard will refuse.]\n\n"
                 "Discovers what to configure in Uzio for an ADP Prior Payroll migration. "
                 "Given a (sanitized) ADP Prior Payroll file plus the State Tax Code master "
                 "CSV, produces an Excel workbook with:\n"
@@ -757,6 +800,11 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="adp_census_generator",
             description=(
+                "[VENDOR: ADP only] [INPUT: ADP Census export (.xlsx/.csv)]\n"
+                "[OUTPUT: Uzio Census Template (.xlsm) -- the BLANK template is read from the "
+                "templates folder and filled with the ADP data]\n"
+                "[DO NOT USE FOR: UZIO files (this generates UZIO from ADP, not the reverse) "
+                "or Paycom files (use 'paycom_census_generator'). Runtime guard enforces.]\n\n"
                 "Generates a Uzio Census Template (.xlsm) from an ADP Census export. "
                 "Reads ADP columns (e.g. 'Associate ID', 'Legal First Name', "
                 "'FLSA Description'), maps them to the Uzio template's expected headers, "
@@ -787,6 +835,11 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="paycom_census_generator",
             description=(
+                "[VENDOR: Paycom only] [INPUT: Paycom Census export (.xlsx/.csv) with columns "
+                "Employee_Code, Legal_Firstname, Exempt_Status, etc.]\n"
+                "[OUTPUT: Uzio Census Template (.xlsm)]\n"
+                "[DO NOT USE FOR: ADP files (use 'adp_census_generator') or UZIO files - "
+                "the runtime guard will refuse non-Paycom inputs.]\n\n"
                 "Generates a Uzio Census Template (.xlsm) from a Paycom Census export. "
                 "Reads Paycom columns (e.g. 'Employee_Code', 'Legal_Firstname', "
                 "'Exempt_Status'), maps them to the Uzio template's expected headers, "
@@ -817,7 +870,12 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="adp_emergency_audit",
-            description="Audits emergency contact information between Uzio and ADP.",
+            description=(
+                "[VENDOR: ADP + UZIO (two-file audit)] [uzio_file_path: UZIO Emergency Contacts] "
+                "[adp_file_path: ADP Emergency Contact Report]\n"
+                "Audits emergency contact information (name, relationship, phone) between Uzio "
+                "and ADP per employee."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -830,7 +888,11 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="adp_license_audit",
-            description="Audits professional licenses between Uzio and ADP.",
+            description=(
+                "[VENDOR: ADP + UZIO (two-file audit)] [uzio_file_path: UZIO License Report] "
+                "[adp_file_path: ADP License / Certification Report]\n"
+                "Audits professional licenses (number, type, expiration) between Uzio and ADP."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -843,7 +905,11 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="adp_timeoff_audit",
-            description="Audits time-off balances between Uzio and ADP.",
+            description=(
+                "[VENDOR: ADP + UZIO (two-file audit)] [uzio_file_path: UZIO Time Off Balances] "
+                "[adp_file_path: ADP Accrual / PTO Balance Report]\n"
+                "Audits time-off balances (PTO, sick, vacation accruals) between Uzio and ADP."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -952,7 +1018,13 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="paycom_deduction_analyzer",
-            description="Analyzes Paycom deductions and consolidation plans.",
+            description=(
+                "[VENDOR: Paycom only (two Paycom files)] [scheduled_report_path: Paycom Scheduled "
+                "Deductions Report] [prior_payroll_path: Paycom Prior Payroll]\n"
+                "[DO NOT USE FOR: ADP files or UZIO files - this is a Paycom-internal "
+                "deduction-vs-actual analysis.]\n"
+                "Analyzes Paycom deductions and consolidation plans (scheduled vs. actually deducted)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -968,7 +1040,13 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="paycom_total_comparison",
             description=(
-                "Performs a complete payroll total comparison between Paycom and Uzio reports. "
+                "[VENDOR: Paycom + UZIO (two-file audit)] [paycom_file_paths: 1+ Paycom Prior "
+                "Payroll files] [uzio_file_path: UZIO Master / Custom Report]\n"
+                "[DO NOT confuse the slots - Paycom file goes in paycom_file_paths, UZIO file "
+                "goes in uzio_file_path.]\n\n"
+                "Performs a complete payroll total comparison between Paycom and Uzio reports, "
+                "producing 6 sheets: Full Comparison, Mismatches Only, Employee Mismatches, "
+                "Duplicate Pay Periods, Pay Stub Counts, and Tax Rate Verification. "
                 "HINT: Always call 'list_audit_files' first to identify the correct paths."
             ),
             inputSchema={
@@ -991,7 +1069,13 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="paycom_deduction_audit",
-            description="Compares deduction amounts between Uzio and Paycom reports.",
+            description=(
+                "[VENDOR: Paycom + UZIO (two-file audit)] [uzio_file_path: UZIO Deduction Report] "
+                "[paycom_file_path: Paycom Deduction Register]\n"
+                "[REQUIRED: mapping_json - JSON object mapping Paycom Deduction Description to "
+                "UZIO Deduction Name]\n"
+                "Compares deduction amounts between Uzio and Paycom per employee, per code."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1006,7 +1090,12 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="paycom_census_audit",
-            description="Audits employee census data between Uzio and Paycom to find mismatches in names, emails, etc.",
+            description=(
+                "[VENDOR: Paycom + UZIO (two-file audit)] [uzio_file_path: UZIO Census Custom Report] "
+                "[paycom_file_path: Paycom Census export]\n"
+                "Audits employee census data between Uzio and Paycom to find mismatches in names, "
+                "emails, addresses, hire/term dates, status, FLSA, etc."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1019,7 +1108,12 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="paycom_sql_master",
-            description="Processes a Paycom SQL Master file into a structured audit report.",
+            description=(
+                "[VENDOR: Paycom only] [INPUT: Paycom UPS SQL Master file (.sql/.csv/.xlsx)]\n"
+                "[DO NOT USE FOR: ADP files, UZIO files, or generic SQL exports - this is a "
+                "Paycom-specific consolidation report.]\n"
+                "Processes a Paycom UPS SQL Master file into a structured audit report."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1030,7 +1124,11 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="paycom_payment_audit",
-            description="Audits payment methods and amounts between Uzio and Paycom.",
+            description=(
+                "[VENDOR: Paycom + UZIO (two-file audit)] [uzio_file_path: UZIO Payment Report] "
+                "[paycom_file_path: Paycom Payment Register]\n"
+                "Audits payment methods (direct deposit / check) and amounts between Uzio and Paycom."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1043,7 +1141,11 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="paycom_emergency_audit",
-            description="Audits emergency contact information between Uzio and Paycom.",
+            description=(
+                "[VENDOR: Paycom + UZIO (two-file audit)] [uzio_file_path: UZIO Emergency Contacts] "
+                "[paycom_file_path: Paycom Emergency Contact Report]\n"
+                "Audits emergency contact information (name, relationship, phone) between Uzio and Paycom."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1056,7 +1158,11 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="paycom_timeoff_audit",
-            description="Audits time-off balances between Uzio and Paycom.",
+            description=(
+                "[VENDOR: Paycom + UZIO (two-file audit)] [uzio_file_path: UZIO Time Off Balances] "
+                "[paycom_file_path: Paycom Accrual / PTO Balance Report]\n"
+                "Audits time-off balances (PTO, sick, vacation accruals) between Uzio and Paycom."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1069,7 +1175,12 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="paycom_withholding_audit",
-            description="Audits tax withholding settings between Uzio and Paycom.",
+            description=(
+                "[VENDOR: Paycom + UZIO (two-file audit)] [uzio_file_path: UZIO Withholding Report] "
+                "[paycom_file_path: Paycom Withholding / W-4 Report]\n"
+                "Audits federal + state tax withholding settings (filing status, allowances, "
+                "extra withholding, exemptions) between Uzio and Paycom per employee."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1085,6 +1196,10 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="paycom_census_sanity",
             description=(
+                "[VENDOR: Paycom only] [INPUT: Paycom Census export (.xlsx/.csv) with columns "
+                "Employee_Code, SS_Number, Department_Desc, DOL_Status, etc.]\n"
+                "[DO NOT USE FOR: ADP Census (use 'adp_census_sanity') or UZIO files - the "
+                "runtime guard will refuse non-Paycom inputs.]\n\n"
                 "Applies opt-in auto-corrections to a Paycom Census export. "
                 "MANDATORY: For stability, always use copy_to_audit_inbox first and then use 'file_path'. "
                 "Do NOT use 'file_base64' for files > 1MB."
@@ -1138,7 +1253,13 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="selective_employee_extractor",
-            description="Extracts specific employee records from a payroll/census file based on a list of IDs.",
+            description=(
+                "[VENDOR-AGNOSTIC] [INPUT: any payroll/census file (ADP, Paycom, UZIO) with "
+                "an Employee ID column] [OUTPUT: a slimmed-down file containing only the "
+                "rows for the requested IDs]\n"
+                "Use this to isolate problematic employees flagged by an audit, so downstream "
+                "tools work on a manageable subset. Preserves the input file's schema."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1152,8 +1273,11 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="read_audit_report",
             description=(
-                "Reads the contents of any Excel or CSV audit report from the Desktop or Audit Files folder. "
-                "Use this to analyze reports that were previously generated or to 'see' the data in a file."
+                "[VENDOR-AGNOSTIC] [INPUT: any Excel or CSV file]\n"
+                "Reads the full contents of an audit report (Excel or CSV) into the response. "
+                "Use this AFTER an audit tool has produced output, to inspect specific rows. "
+                "WARNING: Loads the whole file into context; for files > 1MB use get_file_schema "
+                "+ query_data_sql instead."
             ),
             inputSchema={
                 "type": "object",
@@ -1169,8 +1293,11 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="get_file_schema",
             description=(
-                "Inspects a CSV or Excel file to return its column names, data types, and a small sample (first 5 rows). "
-                "Caches the file in memory for 5x faster subsequent queries. Returns 'date_hint_columns' for SQL casting."
+                "[VENDOR-AGNOSTIC] [INPUT: any CSV or Excel file]\n"
+                "Inspects a file and returns column names, dtypes, and a 5-row sample. "
+                "Caches the file in memory for 5x faster subsequent query_data_sql calls. "
+                "Returns 'date_hint_columns' so you know which columns need CAST(... AS DATE) "
+                "in SQL. ALWAYS call this before query_data_sql so you know the schema."
             ),
             inputSchema={
                 "type": "object",
@@ -1184,8 +1311,14 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="query_data_sql",
             description=(
-                "Executes a SQL query against a local file using DuckDB. Uses in-memory cache. "
-                "Table name is 'data'. Ephemeral connection. Use CAST(col AS DATE) if date column is type object."
+                "[VENDOR-AGNOSTIC] [INPUT: any CSV or Excel file]\n"
+                "Executes a SQL query against the file using DuckDB. The file is loaded into "
+                "a single in-memory table named 'data'. Use this for files too big to fit in "
+                "context (the 1MB+ problem). The connection is ephemeral; DDL statements are "
+                "discarded between calls.\n"
+                "PRECONDITION: call get_file_schema first to learn column names and dtypes. "
+                "Date columns often arrive as type 'object' (string), so wrap with "
+                "CAST(col AS DATE) when filtering by date."
             ),
             inputSchema={
                 "type": "object",
@@ -1312,7 +1445,11 @@ async def handle_call_tool(name: str, arguments: dict | None):
 
         elif name == "adp_census_sanity":
             content = load_file(arguments, "file_path", "file_base64")
-            filename = arguments.get("filename") or "upload.xlsx"
+            filename = arguments.get("filename") or (
+                os.path.basename(arguments["file_path"].strip().strip('"'))
+                if arguments.get("file_path") else "upload.xlsx"
+            )
+            require_vendor(content, filename, "adp", "adp_census_sanity")
             toggle_keys = [
                 "fix_flsa", "fix_emails", "fix_job_title", "fix_driver_smart", "fix_license",
                 "fix_status", "fix_type", "fix_dol_status", "fix_leave_to_active",
@@ -1474,6 +1611,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
             filename = arguments.get("filename") or (
                 os.path.basename(file_path_arg) if file_path_arg else "upload.xlsx"
             )
+            require_vendor(content, filename, "adp", "adp_prior_payroll_sanity")
             swap_net_take = bool(arguments.get("swap_net_take", True))
             agg_strategy = arguments.get("aggregation_strategy") or "ask"
             csv_bytes, summary = run_adp_prior_payroll_sanity(
@@ -1507,6 +1645,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
             filename = arguments.get("filename") or (
                 os.path.basename(file_path_arg) if file_path_arg else "adp_prior_payroll.xlsx"
             )
+            require_vendor(content, filename, "adp", "adp_prior_payroll_setup_helper")
             master_path = arguments.get("state_tax_master_path") or r"C:\Users\shobhit.sharma\Downloads\State Tax Code.csv"
             master_b64 = arguments.get("state_tax_master_base64")
             master_content = b""
@@ -1546,6 +1685,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
             filename = arguments.get("filename") or os.path.basename(
                 (arguments.get("file_path") or "adp_census.xlsx").strip().strip('"')
             )
+            require_vendor(content, filename, "adp", "adp_census_generator")
             toggle_keys = [
                 "fix_flsa", "fix_emails", "fix_status", "fix_inactive",
                 "fix_type", "fix_zip", "fix_license", "fix_dol_status",
@@ -1572,6 +1712,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
             filename = arguments.get("filename") or os.path.basename(
                 (arguments.get("file_path") or "paycom_census.xlsx").strip().strip('"')
             )
+            require_vendor(content, filename, "paycom", "paycom_census_generator")
             toggle_keys = [
                 "fix_flsa", "fix_emails", "fix_status", "fix_inactive",
                 "fix_type", "fix_position", "fix_dol_status", "fix_zip", "fix_license",
@@ -1705,7 +1846,11 @@ async def handle_call_tool(name: str, arguments: dict | None):
 
         elif name == "paycom_census_sanity":
             content = load_file(arguments, "file_path", "file_base64")
-            filename = arguments.get("filename") or "upload.xlsx"
+            filename = arguments.get("filename") or (
+                os.path.basename(arguments["file_path"].strip().strip('"'))
+                if arguments.get("file_path") else "upload.xlsx"
+            )
+            require_vendor(content, filename, "paycom", "paycom_census_sanity")
             toggle_keys = [
                 "fix_flsa", "fix_emails", "fix_driver_smart", "fix_license",
                 "fix_status", "fix_type", "fix_position", "fix_dol_status", "fix_zip",

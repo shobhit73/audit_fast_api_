@@ -1,10 +1,28 @@
-# Claude Desktop - Multi-Agent Payroll Migration SOP (v1.5)
+# Claude Desktop - Multi-Agent Payroll Migration SOP (v1.6)
 Before starting any audit or analysis, you **must** verify the data location.
 1.  **Data Access**: You can access files from any local path (e.g., `Downloads`, client folders). Using the `copy_to_audit_inbox` tool is optional but recommended to keep inputs and outputs in `C:\Users\shobhit.sharma\Desktop\Audit Files`.
 2.  **Large Files (>1MB)**: Use the **Side-Car DB Strategy (DuckDB)**. Never attempt to read a file >1MB fully into context.
     *   Call `get_file_schema` to identify columns.
     *   Call `query_data_sql` to extract specific employees or calculate totals using SQL.
 3.  **Confirm Consent**: Never apply `fix_` toggles in Sanity tools without explicit user approval for each correction.
+
+## 0. File-routing matrix (READ THIS FIRST)
+
+Every audit tool's name encodes its scope. Pick the wrong tool and the runtime guard will refuse the call with a clear error - but the right move is to pick correctly the first time.
+
+**Vendor naming convention** (the prefix is the source vendor; the comparison side is always UZIO):
+- `adp_*` -- expects an **ADP** export. Two-file audits (`adp_payment_audit`, `adp_census_audit`, etc.) take both the UZIO file and the ADP file in clearly-named slots.
+- `paycom_*` -- expects a **Paycom** export. Same two-slot pattern for two-file audits.
+- No-prefix tools (`list_audit_files`, `read_audit_report`, `get_file_schema`, `query_data_sql`, `selective_employee_extractor`, `apply_data_corrections`, `copy_to_audit_inbox`) are vendor-agnostic.
+
+**Critical: NEVER call an `adp_*` tool on a UZIO or Paycom file**, and never call a `paycom_*` tool on a UZIO or ADP file. The single-file tools (`*_prior_payroll_sanity`, `*_prior_payroll_setup_helper`, `*_census_sanity`, `*_census_generator`) have a runtime file-shape guard that detects the wrong vendor and refuses. Two-file audits don't have a guard, but the parameter slots are explicit (`uzio_file_path` vs `adp_file_path`/`paycom_file_path`) - putting an ADP file in the `uzio_file_path` slot will produce nonsense matches.
+
+**File-shape recognition (how to tell what kind of file the user has)**:
+- **ADP** exports often have a `Report Criteria` preamble sheet, columns like `ASSOCIATE ID`, `POSITION ID`, `WORKED IN STATE`, `ADDITIONAL EARNINGS  : XXX-CODE` (note the double-space-colon), `VOLUNTARY DEDUCTION : XX-CODE`. Money cells in xlsx are stored as `=ROUND(x, 2.0)` formulas.
+- **Paycom** exports use snake_case: `Employee_Code`, `SS_Number`, `DOL_Status`, `Department_Desc`, `Exempt_Status`. Long-format prior payroll files use `Type_Code` / `Type_Description` / `Code_Description` / `Amount`.
+- **UZIO** files use pipe-delimited section|field column names: `Personal|SSN`, `Job|Employee ID`, `Job|Department`. Raw exports have a 3-row preamble. The Custom Report has category labels in row 1, headers in row 2.
+
+**The wrong-vendor mistake to never make**: do NOT call `adp_prior_payroll_sanity` (or any other ADP-specific tool) on a UZIO Prior Payroll Register / Master file. UZIO files do not have the interleaved totals rows or per-pay-period duplication that the sanity tool exists to fix; running it on a UZIO file will silently produce a corrupted aggregation. The runtime guard now refuses these explicitly.
 
 ## 2. Analysis Agent (Trigger & Orchestration)
 **Trigger**: A new email from an implementer (e.g., Mercedes, Kadence) with census issues, or a manual request to "Audit Client X".
@@ -73,7 +91,10 @@ If the user mentions a specific client (e.g., "Happy Delivery"):
 ## 8. Prior Payroll Workflows (v1.4)
 
 ### 8.1 Prior Payroll Sanity Check (ADP)
-**Trigger**: Implementer uploads an ADP `Prior Payroll Register Report_*.xlsx` that has interleaved `Totals For Associate ID XYZ:` summary rows, a bottom-of-file grand-total row, or multiple per-pay-period rows per employee.
+**Trigger**: Implementer uploads an **ADP** `Prior Payroll Register Report_*.xlsx` that has interleaved `Totals For Associate ID XYZ:` summary rows, a bottom-of-file grand-total row, or multiple per-pay-period rows per employee.
+
+**DO NOT call this tool on a UZIO Prior Payroll Register / Master file.** UZIO files do not have the issues this tool fixes; the runtime guard will refuse the call and tell you the file looks like a UZIO export. UZIO files don't need sanity cleanup at all - they're consumed as-is by audit tools that take a `uzio_file_path` slot.
+
 1.  **Tool**: `adp_prior_payroll_sanity`
 2.  **Inputs**:
     *   `file_path` (preferred) or `file_b64`
