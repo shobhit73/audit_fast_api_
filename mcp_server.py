@@ -2,6 +2,7 @@ import json
 import base64
 import os
 import numpy as np
+import duckdb
 from mcp.server.models import InitializationOptions
 from mcp.server import NotificationOptions, Server
 from mcp.server.sse import SseServerTransport
@@ -39,7 +40,7 @@ from core.paycom.prior_payroll_generator import run_paycom_prior_payroll_generat
 from core.adp.selective_census_sync import run_adp_selective_census_sync, discover_mappings as adp_selective_discover
 from core.paycom.selective_census_sync import run_paycom_selective_census_sync, discover_mappings as paycom_selective_discover
 from core.common.paycom_consolidated_audit import run_paycom_consolidated_audit
-from core.adp.prior_payroll_setup_helper import run_adp_prior_payroll_setup_helper
+from core.adp.prior_payroll_setup_helper import run_adp_prior_payroll_setup_helper, build_simplified_xlsx_bytes as _setup_helper_xlsx
 
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
@@ -167,7 +168,7 @@ def load_mappings_from_paths(paths):
                 for _, row in df.iterrows():
                     mappings.append({
                         "Category": cat,
-                        "Source_Name": str(row[s_col]).strip(),
+                        "ADP_Name": str(row[s_col]).strip(),
                         "UZIO_Name": str(row[u_col]).strip()
                     })
         except Exception as e:
@@ -1121,6 +1122,38 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["file_path"],
             },
         ),
+
+        # --- DATABASE & QUERY TOOLS ---
+        types.Tool(
+            name="get_file_schema",
+            description=(
+                "Inspects a CSV or Excel file to return its column names, data types, and a small sample (first 5 rows). "
+                "Use this to understand the data structure before writing a SQL query."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                },
+                "required": ["file_path"],
+            },
+        ),
+        types.Tool(
+            name="query_data_sql",
+            description=(
+                "Executes a SQL query against a local CSV or Excel file using DuckDB. "
+                "The file is loaded into a temporary table named 'data'. "
+                "Example: SELECT SUM(Gross_Pay) FROM data WHERE Status = 'Active'"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                    "sql_query": {"type": "string", "description": "The SQL query to run. Use 'data' as the table name."},
+                },
+                "required": ["file_path", "sql_query"],
+            },
+        ),
     ]
 
 # ── Tool Handlers ─────────────────────────────────────────────────────────────
@@ -1447,8 +1480,19 @@ async def handle_call_tool(name: str, arguments: dict | None):
             tax_csv_path = os.path.join(AUDIT_INBOX, f"{base}_Tax_Mapping_{stamp}.csv")
             with open(tax_csv_path, "wb") as f:
                 f.write(csv_bytes)
-            summary_info = save_results_to_excel(results, f"{base}_Setup_Helper")
-            summary_info["tax_mapping_csv"] = tax_csv_path
+            xlsx_path = os.path.join(AUDIT_INBOX, f"{base}_Setup_Helper_{stamp}.xlsx")
+            with open(xlsx_path, "wb") as f:
+                f.write(_setup_helper_xlsx(results))
+            bonus = results["Bonus_Classification"][0]
+            summary_info = {
+                "output_file": xlsx_path,
+                "tax_mapping_csv": tax_csv_path,
+                "message": (
+                    f"Setup helper produced a 3-tab xlsx in 'Audit Files'. "
+                    f"Tab 1 = What to Set Up, Tab 2 = Bonus Verdict ({bonus['Verdict']}), "
+                    f"Tab 3 = Pre-Tax vs Post-Tax per deduction."
+                ),
+            }
             return [types.TextContent(type="text", text=json.dumps(summary_info, indent=2, default=_json_default))]
 
         elif name == "adp_census_generator":
@@ -1679,6 +1723,59 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 result = df.to_dict(orient="records")
                 
             return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=_json_default))]
+
+        elif name == "get_file_schema":
+            path = arguments.get("file_path").strip().strip('"')
+            if not os.path.isfile(path):
+                return [types.TextContent(type="text", text=f"Error: File '{path}' not found.")]
+            
+            try:
+                import pandas as pd
+                from utils.audit_utils import find_header_and_data
+                with open(path, "rb") as f:
+                    content = f.read()
+                    if not content:
+                        return [types.TextContent(type="text", text="Error: File is empty.")]
+                    df, _, _ = find_header_and_data(content, os.path.basename(path))
+                
+                schema = {
+                    "filename": os.path.basename(path),
+                    "total_rows": len(df),
+                    "columns": [str(c) for c in df.columns],
+                    "dtypes": {str(c): str(t) for c, t in df.dtypes.items()},
+                    "sample_data": df.head(5).to_dict(orient="records")
+                }
+                return [types.TextContent(type="text", text=json.dumps(schema, indent=2, default=_json_default))]
+            except Exception as e:
+                return [types.TextContent(type="text", text=f"Error analyzing schema: {str(e)}")]
+
+        elif name == "query_data_sql":
+            path = arguments.get("file_path").strip().strip('"')
+            sql = arguments.get("sql_query")
+            if not os.path.isfile(path):
+                return [types.TextContent(type="text", text=f"Error: File '{path}' not found.")]
+            
+            try:
+                import pandas as pd
+                from utils.audit_utils import find_header_and_data
+                
+                with open(path, "rb") as f:
+                    df, _, _ = find_header_and_data(f.read(), os.path.basename(path))
+                
+                con = duckdb.connect(database=':memory:')
+                con.register('data', df)
+                
+                res_df = con.execute(sql).df()
+                
+                result = {
+                    "query": sql,
+                    "rows_found": len(res_df),
+                    "data": res_df.to_dict(orient="records") if len(res_df) < 500 else res_df.head(100).to_dict(orient="records"),
+                    "note": "Full data returned." if len(res_df) < 500 else "Data truncated (first 100 rows). Use more specific SQL filters."
+                }
+                return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=_json_default))]
+            except Exception as e:
+                return [types.TextContent(type="text", text=f"SQL Error: {str(e)}")]
 
         raise ValueError(f"Unknown tool: {name}")
 

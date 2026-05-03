@@ -524,6 +524,164 @@ def tax_mapping_to_csv_bytes(rows):
     return df.to_csv(index=False).encode("utf-8")
 
 
+# ---------- simplified xlsx writer ----------
+
+def _pick_bonus_example(samples, verdict):
+    """Single most illustrative row for the chosen verdict."""
+    if not samples:
+        return None
+    if verdict == "non_discretionary":
+        cands = [s for s in samples if s["verdict_row"] == "non_discretionary"]
+        return max(cands, key=lambda s: s["diff_pct"]) if cands else samples[0]
+    if verdict == "discretionary":
+        cands = [s for s in samples if s["verdict_row"] == "discretionary"]
+        return min(cands, key=lambda s: abs(s["diff_pct"])) if cands else samples[0]
+    return samples[0]
+
+
+def _deduction_reason(row):
+    verdict = row["Verdict"]
+    flavor = row.get("Pre-Tax Flavor", "")
+    sample = row.get("Sample", "")
+    if verdict == "post_tax":
+        return ("No row in the file showed taxable wages being reduced by this "
+                "deduction's amount, so it does NOT shrink the tax base.")
+    if flavor == "section_125":
+        first = sample.split(";")[0].strip() if sample else ""
+        return ("Reduces FIT, FICA, Medicare, and state-income taxable wages by the "
+                "deduction amount -- Section 125 cafeteria plan." +
+                (f" Example row: {first}" if first else ""))
+    if flavor == "401k_traditional":
+        first = sample.split(";")[0].strip() if sample else ""
+        return ("Reduces FIT and state-income taxable wages but NOT FICA/Medicare -- "
+                "traditional 401(k)/403(b) pattern." +
+                (f" Example row: {first}" if first else ""))
+    if flavor == "pretax_unknown":
+        return "Reduces FIT taxable wages only (no FICA/Medicare reduction observed)."
+    if flavor == "mixed_unusual":
+        return f"Pre-tax for: {row.get('Pre-Tax Of', '')} (unusual mix -- review)."
+    return "Pre-tax (see sample column for the matching row)."
+
+
+def build_simplified_xlsx_bytes(results):
+    """Three-tab simplified xlsx that answers exactly:
+      Tab 1 - What to set up in Uzio (Earnings | Contributions | Deductions)
+      Tab 2 - Bonus discretionary or non-discretionary (verdict + one example)
+      Tab 3 - Each deduction: pre-tax or post-tax + plain-English why
+    """
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        wb = writer.book
+        header_fmt = wb.add_format({
+            "bold": True, "bg_color": "#1F4E78", "font_color": "white",
+            "border": 1, "align": "left", "valign": "vcenter",
+        })
+        wrap_fmt = wb.add_format({"valign": "top", "text_wrap": True})
+        v_pre = wb.add_format({"bold": True, "bg_color": "#C6EFCE",
+                               "font_color": "#006100", "align": "center", "valign": "vcenter"})
+        v_post = wb.add_format({"bold": True, "bg_color": "#FFC7CE",
+                                "font_color": "#9C0006", "align": "center", "valign": "vcenter"})
+        v_nondisc = wb.add_format({"bold": True, "bg_color": "#FFC7CE",
+                                   "font_color": "#9C0006", "align": "left",
+                                   "valign": "vcenter", "font_size": 14})
+        v_disc = wb.add_format({"bold": True, "bg_color": "#C6EFCE",
+                                "font_color": "#006100", "align": "left",
+                                "valign": "vcenter", "font_size": 14})
+
+        # Tab 1: What to Set Up
+        earn = [r["Code"] for r in results["Earnings_Codes"]]
+        contrib = [r["Code"] for r in results["Contributions"]]
+        ded = [r["Code"] for r in results["Deductions"]]
+        max_n = max(len(earn), len(contrib), len(ded), 1)
+        rows1 = [{
+            "Earnings": earn[i] if i < len(earn) else "",
+            "Contributions": contrib[i] if i < len(contrib) else "",
+            "Deductions": ded[i] if i < len(ded) else "",
+        } for i in range(max_n)]
+        df1 = pd.DataFrame(rows1)
+        df1.to_excel(writer, sheet_name="1. What to Set Up", index=False)
+        ws1 = writer.sheets["1. What to Set Up"]
+        ws1.set_column("A:A", 32); ws1.set_column("B:B", 24); ws1.set_column("C:C", 32)
+        for i, c in enumerate(df1.columns):
+            ws1.write(0, i, c, header_fmt)
+        ws1.set_row(0, 24)
+
+        # Tab 2: Bonus
+        bonus = results["Bonus_Classification"][0]
+        sample = _pick_bonus_example(results["Bonus_Sample_Rows"], bonus["Verdict"])
+        verdict_label = bonus["Verdict"].upper().replace("_", "-")
+        rows2 = [
+            ("Verdict", verdict_label),
+            ("Reason", bonus["Reason"]),
+            ("Bonus codes detected in file", bonus["Bonus Columns"]),
+            ("Rows that had both bonus AND overtime", bonus["Rows Tested"]),
+            ("    of which discretionary", bonus["Discretionary Rows"]),
+            ("    of which non-discretionary", bonus["Non-Discretionary Rows"]),
+        ]
+        if sample:
+            rows2 += [
+                ("", ""),
+                ("---- Example row that proves the verdict ----", ""),
+                ("Associate ID", sample["associate"]),
+                ("Regular earnings", f"${sample['regular_earnings']:,}"),
+                ("Regular hours", sample["regular_hours"]),
+                ("Regular rate ($/hr)", f"${sample['regular_rate']}"),
+                ("Expected overtime rate  (1.5 x regular)", f"${sample['expected_ot_rate_1.5x']}"),
+                ("Actual overtime rate from this row", f"${sample['actual_ot_rate']}"),
+                ("Difference (%)", f"{sample['diff_pct']}%"),
+                ("Bonus paid in this row", f"${sample['bonus_amt']:,}"),
+                ("", ""),
+                ("Plain-English explanation",
+                    "Actual OT rate is HIGHER than 1.5 x regular rate => the bonus was rolled into "
+                    "the regular rate before computing OT => bonus is NON-DISCRETIONARY (FLSA rule)."
+                    if bonus["Verdict"] == "non_discretionary" else
+                    "Actual OT rate matches 1.5 x regular rate exactly => the bonus did NOT inflate "
+                    "the regular rate basis => bonus is DISCRETIONARY."
+                    if bonus["Verdict"] == "discretionary" else
+                    bonus["Reason"]),
+            ]
+        df2 = pd.DataFrame(rows2, columns=["Field", "Value"])
+        df2.to_excel(writer, sheet_name="2. Bonus Verdict", index=False)
+        ws2 = writer.sheets["2. Bonus Verdict"]
+        ws2.set_column("A:A", 44); ws2.set_column("B:B", 80, wrap_fmt)
+        for i, c in enumerate(df2.columns):
+            ws2.write(0, i, c, header_fmt)
+        ws2.set_row(0, 24)
+        if bonus["Verdict"] == "non_discretionary":
+            ws2.write(1, 1, verdict_label, v_nondisc)
+        elif bonus["Verdict"] == "discretionary":
+            ws2.write(1, 1, verdict_label, v_disc)
+        ws2.set_row(1, 28)
+
+        # Tab 3: Pre/Post-Tax
+        rows3 = []
+        for r in results["Contributions"] + results["Deductions"]:
+            rows3.append({
+                "Code": r["Code"],
+                "Verdict": "PRE-TAX" if r["Verdict"] == "pre_tax" else "POST-TAX",
+                "Why": _deduction_reason(r),
+            })
+        if not rows3:
+            rows3 = [{"Code": "(none)", "Verdict": "",
+                      "Why": "No voluntary deductions or contributions found in this file."}]
+        df3 = pd.DataFrame(rows3)
+        df3.to_excel(writer, sheet_name="3. Pre-Tax vs Post-Tax", index=False)
+        ws3 = writer.sheets["3. Pre-Tax vs Post-Tax"]
+        ws3.set_column("A:A", 26); ws3.set_column("B:B", 14)
+        ws3.set_column("C:C", 110, wrap_fmt)
+        for i, c in enumerate(df3.columns):
+            ws3.write(0, i, c, header_fmt)
+        ws3.set_row(0, 24)
+        for ri, r in enumerate(rows3, start=1):
+            if r["Verdict"] == "PRE-TAX":
+                ws3.write(ri, 1, "PRE-TAX", v_pre)
+            elif r["Verdict"] == "POST-TAX":
+                ws3.write(ri, 1, "POST-TAX", v_post)
+            ws3.set_row(ri, 30)
+
+    return buf.getvalue()
+
+
 # ---------- orchestrator ----------
 
 def run_adp_prior_payroll_setup_helper(
