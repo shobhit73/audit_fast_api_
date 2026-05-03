@@ -79,11 +79,31 @@ def _read_excel_with_formula_eval(buf):
             break
 
     headers = [ws.cell(header_idx + 1, c).value for c in range(1, ws.max_column + 1)]
+    headers = _dedup_headers(headers)
     rows = []
     for r in range(header_idx + 2, ws.max_row + 1):
         row = [_evaluate_cell(ws.cell(r, c).value) for c in range(1, ws.max_column + 1)]
         rows.append(row)
     return pd.DataFrame(rows, columns=headers), header_idx, target_sheet
+
+
+def _dedup_headers(headers):
+    """Match pandas.read_csv's mangle-dupe-cols behavior: first occurrence keeps
+    the original name, subsequent occurrences get '.1', '.2', etc. suffixes.
+    The rest of the pipeline (aggregate_by_associate, identity_cols matching,
+    tax-token map, etc.) already expects this convention.
+    """
+    seen = {}
+    out = []
+    for h in headers:
+        h_str = "" if h is None else str(h)
+        if h_str in seen:
+            seen[h_str] += 1
+            out.append(f"{h_str}.{seen[h_str]}")
+        else:
+            seen[h_str] = 0
+            out.append(h_str)
+    return out
 
 
 def read_input_bytes(content, filename):
