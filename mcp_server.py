@@ -49,6 +49,41 @@ server = Server("audit-tool-server")
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+# ── Caching System for SQL Tools ─────────────────────────────────────────────
+_DF_CACHE = {} # Key: (path, mtime, size, sheet_name) | Value: pd.DataFrame
+
+def _get_cached_df(path, sheet_name=None):
+    """Loads a file into a DataFrame with in-memory caching."""
+    import os
+    import pandas as pd
+    from utils.audit_utils import find_header_and_data
+    
+    if not os.path.isfile(path):
+        return None, f"Error: File '{path}' not found."
+    
+    try:
+        stat = os.stat(path)
+        cache_key = (path, stat.st_mtime, stat.st_size, sheet_name)
+        
+        if cache_key in _DF_CACHE:
+            return _DF_CACHE[cache_key], None
+            
+        # Load the data
+        if sheet_name:
+            df = pd.read_excel(path, sheet_name=sheet_name) if path.lower().endswith(('.xlsx', '.xls')) else pd.read_csv(path)
+        else:
+            with open(path, "rb") as f:
+                df, _, _ = find_header_and_data(f.read(), os.path.basename(path))
+        
+        # Limit cache size (keep last 5 files)
+        if len(_DF_CACHE) > 5:
+            _DF_CACHE.clear()
+            
+        _DF_CACHE[cache_key] = df
+        return df, None
+    except Exception as e:
+        return None, str(e)
+
 def _json_default(o):
     """Custom JSON encoder for numpy types and other non-serializable objects."""
     if isinstance(o, (np.integer,)):
@@ -62,8 +97,6 @@ def _json_default(o):
     # Handle pandas types specifically if numpy check isn't enough
     if hasattr(o, "item") and callable(o.item):
         return o.item()
-    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
-
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 def save_results_to_excel(results, name_prefix):
@@ -655,14 +688,23 @@ async def handle_list_tools() -> list[types.Tool]:
                     },
                     "aggregation_strategy": {
                         "type": "string",
-                        "enum": ["full_quarter", "preserve_pay_periods"],
+                        "enum": ["ask", "full_quarter", "preserve_pay_periods"],
                         "description": (
-                            "How to handle multi-row-per-associate files. "
-                            "'full_quarter' (default) collapses all rows for an associate "
-                            "into one (matches the Streamlit 'Full Quarter (Default)' radio). "
-                            "'preserve_pay_periods' keeps distinct pay periods intact and "
-                            "only merges same-day duplicate row pairs (matches the Streamlit "
-                            "'Preserve Pay Periods' radio)."
+                            "How to handle multi-row-per-associate files.\n"
+                            "  'ask' (DEFAULT) -- runs detection only, returns facts + a "
+                            "recommendation (full_quarter vs preserve_pay_periods), and writes "
+                            "NO file. Show the recommendation to the user, get their explicit "
+                            "choice, then re-call this tool with the chosen value below. "
+                            "Always start here unless the user has already told you which "
+                            "strategy they want.\n"
+                            "  'full_quarter' -- collapses all rows for an associate into one "
+                            "(matches the Streamlit 'Full Quarter' radio). Right for full-"
+                            "quarter per-pay-period exports the implementor mistakenly left "
+                            "un-aggregated.\n"
+                            "  'preserve_pay_periods' -- keeps distinct pay periods intact, "
+                            "merging only same-day duplicate row pairs (matches the Streamlit "
+                            "'Preserve Pay Periods' radio). Right for partial-quarter exports "
+                            "where the API expects per-period rows."
                         ),
                     },
                 },
@@ -1128,12 +1170,13 @@ async def handle_list_tools() -> list[types.Tool]:
             name="get_file_schema",
             description=(
                 "Inspects a CSV or Excel file to return its column names, data types, and a small sample (first 5 rows). "
-                "Use this to understand the data structure before writing a SQL query."
+                "Caches the file in memory for 5x faster subsequent queries. Returns 'date_hint_columns' for SQL casting."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": PATH_DESC},
+                    "sheet_name": {"type": "string", "description": "Optional: Excel sheet name (defaults to auto-detected/first)"},
                 },
                 "required": ["file_path"],
             },
@@ -1141,15 +1184,15 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="query_data_sql",
             description=(
-                "Executes a SQL query against a local CSV or Excel file using DuckDB. "
-                "The file is loaded into a temporary table named 'data'. "
-                "Example: SELECT SUM(Gross_Pay) FROM data WHERE Status = 'Active'"
+                "Executes a SQL query against a local file using DuckDB. Uses in-memory cache. "
+                "Table name is 'data'. Ephemeral connection. Use CAST(col AS DATE) if date column is type object."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": PATH_DESC},
                     "sql_query": {"type": "string", "description": "The SQL query to run. Use 'data' as the table name."},
+                    "sheet_name": {"type": "string", "description": "Optional: Excel sheet name."},
                 },
                 "required": ["file_path", "sql_query"],
             },
@@ -1432,13 +1475,16 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 os.path.basename(file_path_arg) if file_path_arg else "upload.xlsx"
             )
             swap_net_take = bool(arguments.get("swap_net_take", True))
-            agg_strategy = arguments.get("aggregation_strategy") or "full_quarter"
+            agg_strategy = arguments.get("aggregation_strategy") or "ask"
             csv_bytes, summary = run_adp_prior_payroll_sanity(
                 content,
                 filename=filename,
                 swap_net_take=swap_net_take,
                 aggregation_strategy=agg_strategy,
             )
+            if summary.get("mode") == "detection_only":
+                # Detection-only mode: no file written, return facts + recommendation.
+                return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
             base = os.path.splitext(filename)[0] or "ADP_Prior_Payroll"
@@ -1726,23 +1772,28 @@ async def handle_call_tool(name: str, arguments: dict | None):
 
         elif name == "get_file_schema":
             path = arguments.get("file_path").strip().strip('"')
-            if not os.path.isfile(path):
-                return [types.TextContent(type="text", text=f"Error: File '{path}' not found.")]
+            sheet = arguments.get("sheet_name")
+            df, error = _get_cached_df(path, sheet)
+            if error: return [types.TextContent(type="text", text=error)]
             
             try:
-                import pandas as pd
-                from utils.audit_utils import find_header_and_data
-                with open(path, "rb") as f:
-                    content = f.read()
-                    if not content:
-                        return [types.TextContent(type="text", text="Error: File is empty.")]
-                    df, _, _ = find_header_and_data(content, os.path.basename(path))
-                
+                import re
+                date_cols = []
+                for col in df.columns:
+                    if df[col].dtype == 'object':
+                        # Check sample for date-like pattern (YYYY-MM-DD or MM/DD/YYYY)
+                        sample = df[col].dropna().head(5).astype(str).tolist()
+                        if any(re.search(r'\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4}', s) for s in sample):
+                            date_cols.append(col)
+
                 schema = {
                     "filename": os.path.basename(path),
+                    "sheet_name": sheet or "Auto-detected",
                     "total_rows": len(df),
                     "columns": [str(c) for c in df.columns],
                     "dtypes": {str(c): str(t) for c, t in df.dtypes.items()},
+                    "date_hint_columns": date_cols,
+                    "sql_note": f"If querying columns {date_cols}, use CAST(col AS DATE) for proper comparison." if date_cols else None,
                     "sample_data": df.head(5).to_dict(orient="records")
                 }
                 return [types.TextContent(type="text", text=json.dumps(schema, indent=2, default=_json_default))]
@@ -1751,17 +1802,13 @@ async def handle_call_tool(name: str, arguments: dict | None):
 
         elif name == "query_data_sql":
             path = arguments.get("file_path").strip().strip('"')
+            sheet = arguments.get("sheet_name")
             sql = arguments.get("sql_query")
-            if not os.path.isfile(path):
-                return [types.TextContent(type="text", text=f"Error: File '{path}' not found.")]
+            
+            df, error = _get_cached_df(path, sheet)
+            if error: return [types.TextContent(type="text", text=error)]
             
             try:
-                import pandas as pd
-                from utils.audit_utils import find_header_and_data
-                
-                with open(path, "rb") as f:
-                    df, _, _ = find_header_and_data(f.read(), os.path.basename(path))
-                
                 con = duckdb.connect(database=':memory:')
                 con.register('data', df)
                 

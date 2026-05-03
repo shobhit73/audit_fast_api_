@@ -229,7 +229,7 @@ try:
     async def adp_prior_payroll_sanity(
         file: UploadFile = File(...),
         swap_net_take: bool = Form(True),
-        aggregation_strategy: str = Form("full_quarter"),
+        aggregation_strategy: str = Form("ask"),
     ):
         try:
             content = await file.read()
@@ -239,6 +239,10 @@ try:
                 swap_net_take=swap_net_take,
                 aggregation_strategy=aggregation_strategy,
             )
+            if summary.get("mode") == "detection_only":
+                # Return JSON (facts + recommendation) instead of a file.
+                from fastapi.responses import JSONResponse
+                return JSONResponse(content=summary)
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
             base = os.path.splitext(file.filename or "ADP_Prior_Payroll")[0]

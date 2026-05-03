@@ -86,7 +86,11 @@ ADP-only tool ported from the Streamlit `apps/adp/prior_payroll_sanity.py`. Clea
 
 Critical: ADP money cells are stored as `=ROUND(x, 2.0)` Excel formulas. `pandas.read_excel` returns null for those, so this module reads with `openpyxl` and runs every cell through `_evaluate_cell` which extracts the literal value from the formula. If you add a new ADP-side reader anywhere else, use the same evaluator or you'll get all-null money columns.
 
-`run_adp_prior_payroll_sanity(content, filename, swap_net_take=True, aggregation_strategy="full_quarter")` returns `(csv_bytes, summary_dict)`. `aggregation_strategy` mirrors the Streamlit UI's radio: `"full_quarter"` collapses everything to one row per associate; `"preserve_pay_periods"` keeps distinct pay periods and only merges same-day duplicate row pairs. Output is CSV with the input's exact column headers and column order — the API expects ADP-shape, no renames.
+`run_adp_prior_payroll_sanity(content, filename, swap_net_take=True, aggregation_strategy="ask")` returns `(csv_bytes, summary_dict)`.
+
+**`aggregation_strategy="ask"` is now the default.** In ask-mode the orchestrator calls `detect_file_shape(df)` on the cleaned DataFrame and returns `csv_bytes=b""` plus a `summary_dict` whose `mode == "detection_only"`. The summary contains a `facts` block (associates, total_rows, rows_per_associate_max/avg, distinct_pay_dates, date_span_days, period_min/max), a `recommended_strategy` (`"full_quarter"` for ≥80-day per-pay-period files, `"preserve_pay_periods"` for ≤40-day partials, `None` when ambiguous or already aggregated), and a `recommendation_reason` sentence. The MCP handler returns this JSON directly so Claude can show it to the user, get confirmation, and re-call the tool with the explicit strategy. Never silently apply.
+
+`aggregation_strategy="full_quarter"` collapses everything to one row per associate; `"preserve_pay_periods"` keeps distinct pay periods and only merges same-day duplicate row pairs. Output is CSV with the input's exact column headers and column order — the API expects ADP-shape, no renames.
 
 Exposed both via FastAPI (`/audit/adp/prior-payroll-sanity`) and MCP (`adp_prior_payroll_sanity` tool).
 

@@ -1,8 +1,10 @@
 # Claude Desktop - Multi-Agent Payroll Migration SOP (v1.5)
 Before starting any audit or analysis, you **must** verify the data location.
-1.  **Check Location**: If the files are in `Downloads` or a client folder, you **must** use the `copy_to_audit_inbox` tool to move them to `C:\Users\shobhit.sharma\Desktop\Audit Files`.
-2.  **Verify Size**: If the file is >1MB, **never** use base64 fallback. Always use `file_path`.
-3.  **Confirm Consent**: Never apply `fix_` toggles in Sanity tools without explicit user approval for each toggle.
+1.  **Data Access**: You can access files from any local path (e.g., `Downloads`, client folders). Using the `copy_to_audit_inbox` tool is optional but recommended to keep inputs and outputs in `C:\Users\shobhit.sharma\Desktop\Audit Files`.
+2.  **Large Files (>1MB)**: Use the **Side-Car DB Strategy (DuckDB)**. Never attempt to read a file >1MB fully into context.
+    *   Call `get_file_schema` to identify columns.
+    *   Call `query_data_sql` to extract specific employees or calculate totals using SQL.
+3.  **Confirm Consent**: Never apply `fix_` toggles in Sanity tools without explicit user approval for each correction.
 
 ## 2. Analysis Agent (Trigger & Orchestration)
 **Trigger**: A new email from an implementer (e.g., Mercedes, Kadence) with census issues, or a manual request to "Audit Client X".
@@ -13,7 +15,7 @@ Before starting any audit or analysis, you **must** verify the data location.
 3.  **Plan**: Identify which core audit tools are needed (e.g., `paycom_census_sanity`, `apply_data_corrections`).
 
 ## 2. Ingestion & Extraction Agent
-**CRITICAL**: Never read from remote servers or client folders directly.
+**NOTE**: You can read from any local folder provided by the user. Use the `path` field from `list_audit_files` to ensure accuracy.
 1.  **Copy**: Move master census/payroll files from the client's source folder (e.g., `Downloads/Happy Delivery`) to the local Desktop inbox using the **`copy_to_audit_inbox`** tool.
 2.  **Verify**: Use `list_audit_files` to confirm files are ready in `C:\Users\shobhit.sharma\Desktop\Audit Files`.
 3.  **Isolate**: Call `selective_employee_extractor` to pull only the problematic employees into a temporary "Working Set" CSV/Excel.
@@ -77,10 +79,14 @@ If the user mentions a specific client (e.g., "Happy Delivery"):
     *   `file_path` (preferred) or `file_b64`
     *   `swap_net_take` (default `True`) — flips NET PAY ⇄ TAKE HOME values for the Carvan-style API. Headers are NEVER renamed.
     *   `aggregation_strategy`:
-        *   `"full_quarter"` (default) — collapses everything to one row per associate.
-        *   `"preserve_pay_periods"` — keeps distinct pay periods, only merges same-day duplicate row pairs.
-3.  **Output**: Cleaned CSV in the `Audit Files` folder + summary dict (rows dropped, associates aggregated, merge events).
-4.  **CRITICAL**: ADP money cells are `=ROUND(x, 2.0)` Excel formulas — this tool reads them with `openpyxl` and evaluates the formula. Never use `pandas.read_excel` directly on these files; you'll get null money columns.
+        *   `"ask"` (DEFAULT) — runs detection only, returns facts + a recommendation, **does NOT write a file**. Use this on the FIRST call unless the user has already told you which strategy they want.
+        *   `"full_quarter"` — collapses everything to one row per associate. Use when the file is a full-quarter per-pay-period export the implementer left un-aggregated.
+        *   `"preserve_pay_periods"` — keeps distinct pay periods, only merges same-day duplicate row pairs. Use for partial-period exports where the API expects per-period rows.
+3.  **Two-step workflow** (mandatory unless the user pre-specified a strategy):
+    *   **Step A**: Call with `aggregation_strategy="ask"` (or omit it). Read the response, which contains `facts` (associates, total_rows, date_span_days, rows_per_associate_max, distinct_pay_dates, period_min/max), `recommended_strategy`, and `recommendation_reason`. **Show all of it to the user**, surface the recommendation, and ask them to confirm or override.
+    *   **Step B**: Re-call the tool with the user's chosen `aggregation_strategy="full_quarter"` or `"preserve_pay_periods"`. Now it produces the cleaned CSV.
+4.  **Output**: Cleaned CSV in the `Audit Files` folder + summary dict (rows dropped, associates aggregated, merge events). When `mode == "detection_only"`, no file is written and `output_file` is absent.
+5.  **CRITICAL**: ADP money cells are `=ROUND(x, 2.0)` Excel formulas — this tool reads them with `openpyxl` and evaluates the formula. Never use `pandas.read_excel` directly on these files; you'll get null money columns.
 
 ### 8.2 Prior Payroll Generator (ADP / Paycom)
 **Trigger**: User wants to fill a blank Uzio Prior Payroll Template (.xlsm) from up to 10 ADP/Paycom source files.
