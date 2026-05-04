@@ -256,13 +256,14 @@ def apply_data_corrections(file_path, corrections_list):
 
         # 1. Identify header row (some files have junk rows at the top)
         header_row_idx = 1
-        id_keywords = ["employee id", "employee code", "associate id", "file #", "id#"]
+        id_keywords = ["employee id", "employee code", "associate id", "file #", "id#", "employee_code", "ee code"]
         
         for r in range(1, 20): # Peek first 20 rows
-            row_vals = [norm_colname(cell.value).lower() for cell in ws[r]]
-            if any(any(k in v for k in id_keywords) for v in row_vals):
+            # Normalize cell values: lowercase and replace underscores with spaces for keyword matching
+            row_vals_norm = [norm_colname(cell.value).lower().replace('_', ' ') for cell in ws[r]]
+            if any(any(k in v for k in id_keywords) for v in row_vals_norm):
                 header_row_idx = r
-                norm_headers = row_vals
+                norm_headers = row_vals_norm
                 headers = [str(cell.value) for cell in ws[r]]
                 break
         else:
@@ -1979,11 +1980,13 @@ async def handle_call_tool(name: str, arguments: dict | None):
         elif name == "selective_employee_extractor":
             content = load_file(arguments, "file_path", "file_base64")
             import pandas as pd, io
-            from utils.audit_utils import norm_id
+            from utils.audit_utils import norm_id, find_header_and_data
             
-            # Load file (try Excel then CSV)
-            try: df = pd.read_excel(io.BytesIO(content), dtype=str)
-            except: df = pd.read_csv(io.BytesIO(content), dtype=str)
+            # Use robust header detection
+            filename = arguments.get("file_path", "upload.xlsx")
+            df, _, _ = find_header_and_data(content, filename)
+            # Ensure all columns are strings for consistency
+            df = df.astype(str)
             
             target_ids = [norm_id(eid) for eid in arguments.get("employee_ids", [])]
             

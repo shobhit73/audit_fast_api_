@@ -171,7 +171,8 @@ def normalize_id(x):
     if pd.isna(x) or x is None: return ""
     s = str(x).strip()
     if s.endswith(".0"): s = s[:-2]
-    return s.lstrip("0") if s != "0" else "0"
+    # Handle '0' correctly: lstrip('0') on '0' or '000' returns empty string.
+    return s.lstrip("0") or "0"
 
 def try_parse_date(x):
     x = norm_blank(x)
@@ -212,16 +213,18 @@ def norm_ssn_canonical(x):
 def find_header_and_data(file_content, filename):
     file_io = io.BytesIO(file_content)
     if filename.lower().endswith('.csv'):
-        df_peek = pd.read_csv(file_io, header=None, nrows=50)
+        # Peek first 50 lines to find header
+        file_io.seek(0)
+        lines = [file_io.readline().decode('utf-8', errors='ignore') for _ in range(50)]
         header_idx = 0
-        for i, row in df_peek.iterrows():
-            row_str = " ".join([str(x).lower() for x in row if pd.notna(x)])
-            if any(k in row_str for k in ["employee id", "employee name", "associate id"]):
+        for i, line in enumerate(lines):
+            if any(k in line.lower() for k in ["employee id", "employee name", "associate id", "employee code", "employee_code"]):
                 header_idx = i
                 break
         file_io.seek(0)
         df = pd.read_csv(file_io, header=header_idx)
-        header_top = df_peek.iloc[header_idx - 1].tolist() if header_idx > 0 else None
+        # Use the peek lines to find header_top if needed
+        header_top = lines[header_idx - 1].split(',') if header_idx > 0 else None
     else:
         xls = pd.ExcelFile(file_io)
         sheet = xls.sheet_names[1] if len(xls.sheet_names) > 1 and "criteria" in xls.sheet_names[0].lower() else xls.sheet_names[0]
@@ -229,7 +232,7 @@ def find_header_and_data(file_content, filename):
         header_idx = 0
         for i, row in df_peek.iterrows():
             row_str = " ".join([str(x).lower() for x in row if pd.notna(x)])
-            if any(k in row_str for k in ["employee id", "employee name", "associate id"]):
+            if any(k in row_str for k in ["employee id", "employee name", "associate id", "employee code", "employee_code"]):
                 header_idx = i
                 break
         df = pd.read_excel(xls, sheet_name=sheet, header=header_idx)

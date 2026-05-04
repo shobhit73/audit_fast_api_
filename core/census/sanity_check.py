@@ -328,12 +328,12 @@ def generate_corrected_census_xlsx(content, field_map_dict, fix_options=None,
             for idx in df_download[mask_blank].index:
                 pt_val = str(df_download.at[idx, c_pt]).lower().strip()
                 old_f = df_download.at[idx, c_flsa]
-                if 'hourly' in pt_val:
+                if 'hour' in pt_val:
                     df_download.at[idx, c_flsa] = "Non-Exempt"
                     log_change(idx, "FLSA Status", old_f, "Non-Exempt", "Applied based on Hourly pay type.")
-                elif 'salaried' in pt_val:
+                elif 'salar' in pt_val:
                     df_download.at[idx, c_flsa] = "Exempt"
-                    log_change(idx, "FLSA Status", old_f, "Exempt", "Applied based on Salaried pay type.")
+                    log_change(idx, "FLSA Status", old_f, "Exempt", "Applied based on Salaried/Salary pay type.")
 
     # 6. Smart Driver chain
     if fix_options.get('fix_driver_smart'):
@@ -392,8 +392,24 @@ def generate_corrected_census_xlsx(content, field_map_dict, fix_options=None,
     if fix_options.get('fix_std_hours'):
         c_sh = resolved_field_map.get('Working Hours')
         if c_sh and c_sh in df_download.columns:
-            mask_sh = _is_blank_series(c_sh)
-            df_download.loc[mask_sh, c_sh] = "0"
+            # Zero out hours for ALL hourly employees
+            pt_col = resolved_field_map.get('Pay Type')
+            if pt_col and pt_col in df_download.columns:
+                pt_lower = df_download[pt_col].astype(str).str.lower().str.strip()
+                mask_hourly = pt_lower.str.contains('hour', na=False)
+                
+                # We log changes for those that weren't already "0"
+                for idx in df_download[mask_hourly].index:
+                    old_v = str(df_download.at[idx, c_sh]).strip()
+                    if old_v not in ["0", "0.0", ""]:
+                        df_download.at[idx, c_sh] = "0"
+                        log_change(idx, "Working Hours", old_v, "0", "Forced zero hours for Hourly employee.")
+                    else:
+                        df_download.at[idx, c_sh] = "0"
+            else:
+                # Fallback to blank-only if no pay type col
+                mask_sh = _is_blank_series(c_sh)
+                df_download.loc[mask_sh, c_sh] = "0"
 
     # 9. Header renames (column-level — change norm_to_orig label)
     if fix_options.get('rename_std_hours'):
