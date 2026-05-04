@@ -203,7 +203,9 @@ def run_adp_census_audit(uzio_content, adp_content):
     if uzio.empty: return [{"Status": "Error", "Message": "Uzio file is empty or invalid."}]
 
     try: adp = pd.read_excel(io.BytesIO(adp_content), dtype=str)
-    except: adp = pd.read_csv(io.BytesIO(adp_content), dtype=str)
+    except:
+        try: adp = pd.read_csv(io.BytesIO(adp_content), dtype=str)
+        except UnicodeDecodeError: adp = pd.read_csv(io.BytesIO(adp_content), dtype=str, encoding='latin1')
     
     adp = ensure_unique_columns(adp)
     adp.columns = [norm_colname(c) for c in adp.columns]

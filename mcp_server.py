@@ -512,7 +512,7 @@ async def handle_list_tools() -> list[types.Tool]:
             name="adp_census_audit",
             description=(
                 "[VENDOR: ADP + UZIO (two-file audit)] [uzio_file_path: UZIO Census Custom Report] "
-                "[adp_file_path: ADP Census export]\n"
+                "[adp_file_path: ADP Census export (.xlsx/.csv)]\n"
                 "[DO NOT swap the slots - mixing them produces nonsense.]\n"
                 "Audits employee census data between Uzio and ADP to find mismatches in names, "
                 "emails, addresses, hire/term dates, status, FLSA, etc."
@@ -1155,7 +1155,7 @@ async def handle_list_tools() -> list[types.Tool]:
             name="paycom_census_audit",
             description=(
                 "[VENDOR: Paycom + UZIO (two-file audit)] [uzio_file_path: UZIO Census Custom Report] "
-                "[paycom_file_path: Paycom Census export]\n"
+                "[paycom_file_path: Paycom Census export (.xlsx/.csv)]\n"
                 "Audits employee census data between Uzio and Paycom to find mismatches in names, "
                 "emails, addresses, hire/term dates, status, FLSA, etc."
             ),

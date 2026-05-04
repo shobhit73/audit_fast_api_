@@ -136,7 +136,11 @@ def smart_read_df(content, filename="", sheet_name=None, header='infer', require
                     return pd.read_csv(file_io, header=header_row_idx, **kwargs)
 
         file_io.seek(0)
-        return pd.read_csv(file_io, header=header, **kwargs)
+        try:
+            return pd.read_csv(file_io, header=header, **kwargs)
+        except UnicodeDecodeError:
+            file_io.seek(0)
+            return pd.read_csv(file_io, header=header, encoding='latin1', **kwargs)
     except Exception:
         return pd.DataFrame()
 
