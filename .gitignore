@@ -11,3 +11,4 @@ env/
 .idea/
 *.xlsx
 *.csv
+!templates/amazon_job_titles.csv

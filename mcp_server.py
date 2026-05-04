@@ -1394,6 +1394,41 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["file_path", "sql_query"],
             },
         ),
+        types.Tool(
+            name="job_title_mapping",
+            description=(
+                "[VENDOR: ADP or Paycom] [INPUT: post-sanity census file (.xlsx/.csv)] "
+                "Two-step extract-then-confirm tool. Produces a side-car CSV mapping each "
+                "distinct DSP job title to Amazon's standard 30-row catalog "
+                "(DSP Job Title | Amazon Job Title), used alongside the sanitized "
+                "census by downstream APIs. The census file is NOT modified.\n\n"
+                "Fallback chain when the primary Job Title field is blank:\n"
+                "  - ADP: Job Title Description -> Department Description\n"
+                "  - Paycom: Position -> Business_Title -> Job_Title_Description -> Department_Desc\n\n"
+                "USAGE:\n"
+                "  Step 1 — call WITHOUT 'mapping': returns the distinct DSP titles + the "
+                "Amazon catalog. Map each DSP title to exactly one catalog 'Job Title' value, "
+                "favoring semantic match (e.g. 'Sr. Operations Mgr' -> 'Operations Manager'). "
+                "Use 'Non-DSP Related' as the catch-all.\n"
+                "  Step 2 — call AGAIN with 'mapping' = {dsp_title: amazon_title, ...}. The "
+                "tool writes the 2-column CSV to the audit inbox and returns the path."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "vendor": {"type": "string", "enum": ["adp", "paycom"]},
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                    "file_base64": {"type": "string", "description": "Fallback: base64 encoded census export"},
+                    "filename": {"type": "string"},
+                    "mapping": {
+                        "type": "object",
+                        "description": "Step 2 only. {dsp_title: amazon_title} dict produced from the Step 1 response.",
+                        "additionalProperties": {"type": "string"},
+                    },
+                },
+                "required": ["vendor"],
+            },
+        ),
     ]
 
 # ── Tool Handlers ─────────────────────────────────────────────────────────────
@@ -2071,6 +2106,51 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=_json_default))]
             except Exception as e:
                 return [types.TextContent(type="text", text=f"SQL Error: {str(e)}")]
+
+        elif name == "job_title_mapping":
+            from core.job_title_mapper import (
+                load_amazon_catalog, extract_distinct_titles, write_mapping_csv,
+            )
+            vendor = (arguments.get("vendor") or "").strip().lower()
+            if vendor not in ("adp", "paycom"):
+                return [types.TextContent(type="text", text="Error: 'vendor' must be 'adp' or 'paycom'.")]
+
+            mapping_arg = arguments.get("mapping")
+
+            if not mapping_arg:
+                content = load_file(arguments, "file_path", "file_base64")
+                filename = arguments.get("filename") or (
+                    os.path.basename(arguments["file_path"].strip().strip('"'))
+                    if arguments.get("file_path") else "census.xlsx"
+                )
+                distinct = extract_distinct_titles(content, filename, vendor)
+                catalog = load_amazon_catalog()
+                payload = {
+                    "step": "extract",
+                    "vendor": vendor,
+                    "distinct_dsp_titles": distinct,
+                    "title_count": len(distinct),
+                    "amazon_catalog": catalog,
+                    "instruction": (
+                        "Map each title in 'distinct_dsp_titles' to exactly one 'Job Title' "
+                        "value from 'amazon_catalog'. Then call this tool again with "
+                        "'mapping' = {dsp_title: amazon_title, ...} and the same 'vendor' "
+                        "to write the CSV. Use 'Non-DSP Related' as the catch-all for titles "
+                        "outside DSP scope."
+                    ),
+                }
+                return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
+            if not os.path.exists(AUDIT_INBOX):
+                os.makedirs(AUDIT_INBOX, exist_ok=True)
+            out_path, row_count = write_mapping_csv(mapping_arg, vendor, AUDIT_INBOX)
+            payload = {
+                "step": "save",
+                "vendor": vendor,
+                "output_file": out_path,
+                "rows_written": row_count,
+            }
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
         raise ValueError(f"Unknown tool: {name}")
 
