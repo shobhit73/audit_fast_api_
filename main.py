@@ -29,7 +29,7 @@ try:
     from core.adp.misc_audits import run_adp_emergency_audit, run_adp_license_audit, run_adp_timeoff_audit
 
     # Paycom Imports
-    from core.paycom.deduction_analyzer import run_paycom_deduction_analysis
+    from core.paycom.prior_payroll_setup_helper import run_paycom_prior_payroll_setup_helper
     from core.paycom.total_comparison import run_paycom_total_comparison
     from core.paycom.census_audit import run_paycom_census_audit
     from core.paycom.withholding_audit import run_paycom_withholding_audit
@@ -68,7 +68,7 @@ try:
     async def root():
         return {"message": "Audit Tool API is running", "available_endpoints": [
             "/audit/adp/total-comparison", "/audit/adp/census", "/audit/adp/deduction", "/audit/adp/payment", "/audit/adp/withholding",
-            "/audit/paycom/total-comparison", "/audit/paycom/census", "/audit/paycom/deduction-analyzer"
+            "/audit/paycom/total-comparison", "/audit/paycom/census", "/audit/paycom/prior-payroll-setup-helper"
         ]}
 
     # --- ADP ENDPOINTS ---
@@ -109,11 +109,14 @@ try:
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
     # --- PAYCOM ENDPOINTS ---
-    @app.post("/audit/paycom/deduction-analyzer")
-    async def paycom_deduction_analyzer(scheduled_report: UploadFile = File(...), prior_payroll: UploadFile = File(...), config_file: Optional[UploadFile] = File(None)):
+    @app.post("/audit/paycom/prior-payroll-setup-helper")
+    async def paycom_prior_payroll_setup_helper(prior_payroll: UploadFile = File(...), scheduled_deductions: UploadFile = File(...)):
         try:
-            config_content = await config_file.read() if config_file else None
-            return run_paycom_deduction_analysis(await scheduled_report.read(), await prior_payroll.read(), config_content)
+            results, xlsx_bytes = run_paycom_prior_payroll_setup_helper(
+                await prior_payroll.read(), prior_payroll.filename or "paycom_prior_payroll.xlsx",
+                await scheduled_deductions.read(), scheduled_deductions.filename or "paycom_scheduled.xlsx",
+            )
+            return {"results": results, "xlsx_b64": __import__("base64").b64encode(xlsx_bytes).decode()}
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/audit/paycom/total-comparison")

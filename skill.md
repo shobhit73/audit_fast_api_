@@ -137,6 +137,20 @@ If the user mentions a specific client (e.g., "Happy Delivery"):
 2.  **Output**: 11-sheet Excel report — Summary, Census, Payment, Emergency, Salaried Driver Exceptions, FLSA Compliance, Active Missing, Terminated Missing, Data Quality, High Hourly Rate Anomalies, Duplicate SSN Warnings.
 3.  **Use over individual audits** when running an end-to-end migration check; saves three round-trips.
 
+### 8.5b Prior Payroll Setup Helper (Paycom) -- replaces the deleted Deduction Analyzer
+**Trigger**: Starting a fresh **Paycom** prior payroll migration; need to know what to configure in Uzio (earnings, contributions, deductions), which deductions are pre-tax vs post-tax, and whether bonuses are discretionary.
+1.  **Tool**: `paycom_prior_payroll_setup_helper` (also available as a Streamlit tool under "Paycom - Prior Payroll Setup Helper").
+2.  **Inputs (BOTH required)**:
+    *   `prior_payroll_path` -- Paycom Prior Payroll Register, long format with columns `EE Code, Type Code, Type Description, Amount, Code Description`.
+    *   `scheduled_deductions_path` -- Paycom Scheduled Deductions Report with columns `Deduction Code, Deduction Desc, Tax Treatment`.
+    *   Both go through the runtime guard which refuses non-Paycom files.
+3.  **Output** (3-tab Excel workbook in `Audit Files`):
+    *   Tab 1 -- What to Set Up (Earnings | Contributions | Deductions, codes only).
+    *   Tab 2 -- Pre-Tax vs Post-Tax. Read straight from the **Tax Treatment** column of the Scheduled Deductions report. `B = Section 125 pre-tax`, `H = 401k traditional pre-tax`, `A = post-tax`. No empirical algorithm needed -- Paycom labels each deduction directly.
+    *   Tab 3 -- Bonus Verdict (FLSA). Strategy A+C: when both `OT` (plain) and `WOT` (Paycom's weighted overtime) lines exist for the same employee+period, compare them. WOT > OT means Paycom rolled a bonus into the regular rate => **non-discretionary**. When the differential test cannot run (file has only WOT, only OT, or no bonus codes at all), the verdict is `indeterminate` with a note asking for a Payroll Register Detail with hours.
+4.  **Note**: Roth contributions are correctly classified POST-TAX (Roth's whole purpose is post-tax). Traditional 401(k) is correctly PRE-TAX FIT/SIT-only (Paycom's `H` Tax Treatment).
+5.  **The deleted `paycom_deduction_analyzer` tool**: no longer exists. Calls to it return "Unknown tool". Use `paycom_prior_payroll_setup_helper` for the same use case.
+
 ### 8.5 Prior Payroll Setup Helper (ADP)
 **Trigger**: Starting a fresh ADP prior payroll migration; need to know what to configure in Uzio (earnings, contributions, taxes, deductions) and how to map taxes/deductions correctly.
 1.  **Pre-step**: Run `adp_prior_payroll_sanity` first if the file has interleaved `Totals For Associate ID` rows. The setup helper expects a clean, one-row-per-associate-per-period file.

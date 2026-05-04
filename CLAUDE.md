@@ -1,4 +1,4 @@
-# CLAUDE.md (v1.5)
+# CLAUDE.md (v1.6)
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -73,7 +73,7 @@ Each tool accepts both a local path *and* a base64 fallback — see `load_file()
 - [core/adp/misc_audits.py](core/adp/misc_audits.py) — emergency, license, timeoff
 - [core/misc_audits.py](core/misc_audits.py) — emergency (both vendors), license, timeoff, paycom payment
 
-Real implementations live in: [core/adp/census_audit.py](core/adp/census_audit.py), [core/adp/deduction_audit.py](core/adp/deduction_audit.py), [core/adp/payment_audit.py](core/adp/payment_audit.py), [core/adp/withholding_audit.py](core/adp/withholding_audit.py), [core/adp/total_comparison.py](core/adp/total_comparison.py), [core/adp/prior_payroll_sanity.py](core/adp/prior_payroll_sanity.py), [core/adp/prior_payroll_generator.py](core/adp/prior_payroll_generator.py), [core/adp/prior_payroll_setup_helper.py](core/adp/prior_payroll_setup_helper.py), [core/adp/selective_census_sync.py](core/adp/selective_census_sync.py), [core/paycom/census_audit.py](core/paycom/census_audit.py), [core/paycom/deduction_analyzer.py](core/paycom/deduction_analyzer.py), [core/paycom/total_comparison.py](core/paycom/total_comparison.py), [core/paycom/withholding_audit.py](core/paycom/withholding_audit.py), [core/paycom/sql_master.py](core/paycom/sql_master.py), [core/paycom/prior_payroll_generator.py](core/paycom/prior_payroll_generator.py), [core/paycom/selective_census_sync.py](core/paycom/selective_census_sync.py), [core/common/paycom_consolidated_audit.py](core/common/paycom_consolidated_audit.py), and [core/census/sanity_check.py](core/census/sanity_check.py).
+Real implementations live in: [core/adp/census_audit.py](core/adp/census_audit.py), [core/adp/deduction_audit.py](core/adp/deduction_audit.py), [core/adp/payment_audit.py](core/adp/payment_audit.py), [core/adp/withholding_audit.py](core/adp/withholding_audit.py), [core/adp/total_comparison.py](core/adp/total_comparison.py), [core/adp/prior_payroll_sanity.py](core/adp/prior_payroll_sanity.py), [core/adp/prior_payroll_generator.py](core/adp/prior_payroll_generator.py), [core/adp/prior_payroll_setup_helper.py](core/adp/prior_payroll_setup_helper.py), [core/adp/selective_census_sync.py](core/adp/selective_census_sync.py), [core/paycom/census_audit.py](core/paycom/census_audit.py), [core/paycom/total_comparison.py](core/paycom/total_comparison.py), [core/paycom/withholding_audit.py](core/paycom/withholding_audit.py), [core/paycom/sql_master.py](core/paycom/sql_master.py), [core/paycom/prior_payroll_generator.py](core/paycom/prior_payroll_generator.py), [core/paycom/prior_payroll_setup_helper.py](core/paycom/prior_payroll_setup_helper.py), [core/paycom/selective_census_sync.py](core/paycom/selective_census_sync.py), [core/common/paycom_consolidated_audit.py](core/common/paycom_consolidated_audit.py), and [core/census/sanity_check.py](core/census/sanity_check.py).
 
 ### Prior Payroll Sanity (`core/adp/prior_payroll_sanity.py`)
 
@@ -111,6 +111,24 @@ Key sheets and the algorithms behind them:
 State Tax Code master path defaults to `C:\Users\shobhit.sharma\Downloads\State Tax Code.csv`; can be overridden via `state_tax_master_path` or `state_tax_master_base64`.
 
 Exposed via FastAPI (`/audit/adp/prior-payroll-setup-helper`) and MCP (`adp_prior_payroll_setup_helper` tool). Output also writes the Tax_Mapping CSV to the audit inbox alongside the Excel workbook so it can be uploaded directly to the next migration step.
+
+### Prior Payroll Setup Helper -- Paycom (`core/paycom/prior_payroll_setup_helper.py`)
+
+**Replaces the deleted `paycom_deduction_analyzer` tool.** Mirror of the ADP version with one big simplification: Paycom's Scheduled Deductions report has a `Tax Treatment` column that explicitly labels each deduction's tax handling, so the empirical subset-sum algorithm the ADP helper uses is unnecessary here. Read the column directly:
+
+| Tax Treatment value | Verdict | Flavor |
+|---|---|---|
+| starts with `B` (e.g. `B - S125 Pre-Tax`) | PRE-TAX | Section 125 |
+| starts with `H` (e.g. `H - FICA/FUTA/SUTA Taxable Only (401k)`) | PRE-TAX | 401k traditional |
+| starts with `A` (e.g. `A - After Tax Deduction`) | POST-TAX | (none) |
+
+`run_paycom_prior_payroll_setup_helper(prior_content, prior_filename, scheduled_content, scheduled_filename)` returns `(results_dict, xlsx_bytes)`. The xlsx is the same 3-tab simplified output as the ADP version (Tab 1 What to Set Up, Tab 2 Pre-Tax vs Post-Tax, Tab 3 Bonus Verdict).
+
+**Bonus FLSA test (Strategy A+C)**: Paycom's Prior Payroll Register has no hours column, so the standard `OT_pay = 1.5 × (REG_pay / REG_hours) × OT_hours` test can't run. Instead use Paycom's own `WOT` (Weighted Overtime) calc as the signal: WOT is Paycom's FLSA-correct OT pay. If both plain `OT` and `WOT` lines exist for an employee+period AND they differ by >0.5%, Paycom internally rolled a bonus into the regular rate => **non-discretionary**. When the differential test cannot run (only WOT, only OT, no bonus codes), return `indeterminate` and tell the caller to supply a Payroll Register Detail with hours.
+
+The deleted `core/paycom/deduction_analyzer.py` was a 54-line stub that returned a "Simplified logic for demonstration" message; the real logic lived in the Streamlit version (934 lines, very complex). The new tool replaces both with a tight ~350-line core module.
+
+Exposed via FastAPI (`/audit/paycom/prior-payroll-setup-helper`), MCP (`paycom_prior_payroll_setup_helper`), and Streamlit (`apps/paycom/prior_payroll_setup_helper.py`, sidebar entry "Paycom - Prior Payroll Setup Helper").
 
 ### Prior Payroll Generator (`core/{adp,paycom}/prior_payroll_generator.py`)
 

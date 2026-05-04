@@ -19,7 +19,7 @@ from core.adp.deduction_audit import run_adp_deduction_audit
 from core.adp.payment_audit import run_adp_payment_audit
 from core.adp.withholding_audit import run_adp_withholding_audit
 
-from core.paycom.deduction_analyzer import run_paycom_deduction_analysis
+# paycom_deduction_analyzer was deleted -- replaced by paycom_prior_payroll_setup_helper
 from core.paycom.deduction_audit import run_paycom_deduction_audit
 from core.paycom.total_comparison import run_paycom_total_comparison
 from core.paycom.census_audit import run_paycom_census_audit, PAYCOM_FIELD_MAP
@@ -41,6 +41,7 @@ from core.adp.selective_census_sync import run_adp_selective_census_sync, discov
 from core.paycom.selective_census_sync import run_paycom_selective_census_sync, discover_mappings as paycom_selective_discover
 from core.common.paycom_consolidated_audit import run_paycom_consolidated_audit
 from core.adp.prior_payroll_setup_helper import run_adp_prior_payroll_setup_helper, build_simplified_xlsx_bytes as _setup_helper_xlsx
+from core.paycom.prior_payroll_setup_helper import run_paycom_prior_payroll_setup_helper
 from utils.file_shape_guards import require_vendor
 
 from starlette.applications import Starlette
@@ -459,21 +460,47 @@ async def handle_list_tools() -> list[types.Tool]:
                 "[DO NOT confuse the slots - ADP file goes in adp_file_paths, UZIO file goes "
                 "in uzio_file_path. Wrong placement will produce nonsense matches.]\n\n"
                 "Performs a complete payroll total comparison between ADP and Uzio reports, "
-                "producing 6 sheets: Full Comparison, Mismatches Only, Employee Mismatches, "
-                "Duplicate Pay Periods, Pay Stub Counts, and Tax Rate Verification. "
-                "HINT: Always call 'list_audit_files' first to identify the correct paths."
+                "producing up to 7 sheets: Full Comparison, Mismatches Only, Employee Mismatches, "
+                "All Employee Details, Duplicate Pay Periods, Pay Stub Counts, and Tax Rate Verification.\n\n"
+                "[MAPPINGS ARE REQUIRED FOR FULL OUTPUT] Without mappings, only Pay Stub Counts "
+                "and Tax Rate Verification will populate - the four comparison sheets (Full Comparison, "
+                "Mismatches Only, Employee Mismatches, All Employee Details) will be silently empty "
+                "and not written to the Excel file. The Streamlit version asks the user to upload "
+                "4 mapping files (Earnings, Deductions, Contributions, Taxes) and you MUST do the "
+                "equivalent here.\n\n"
+                "[BEFORE CALLING THIS TOOL] If the user has not provided mapping files or "
+                "mappings_json, STOP and ASK them: 'Do you have the 4 mapping files (Earnings, "
+                "Deductions, Contributions, Taxes mapping files - the same ones the Streamlit "
+                "tool asks for)? Please share their paths.' Do NOT proceed with an empty mappings "
+                "list - the resulting report will be missing the comparison sheets and the user "
+                "will think the tool is broken.\n\n"
+                "HINT: Always call 'list_audit_files' first to identify the correct file paths."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "adp_file_paths": {"type": "array", "items": {"type": "string"}, "description": PATH_DESC},
                     "uzio_file_path": {"type": "string", "description": PATH_DESC},
-                    "mapping_file_paths": {"type": "array", "items": {"type": "string"}, "description": "Local paths to mapping files (Earnings, Deductions, etc.)"},
-                    "mappings_json": {
-                        "type": "string", 
+                    "mapping_file_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
                         "description": (
-                            "Optional: Flat JSON array of mapping objects. Use this if mapping files aren't available."
-                        )
+                            "REQUIRED for full report. Local paths to the 4 mapping files: "
+                            "Earnings (Source Earning Code Name -> Uzio Earning Code Name), "
+                            "Deductions (Source Deduction Code Name -> Uzio Deduction Code Name), "
+                            "Contributions (Source Contribution Code Name -> Uzio Contribution Code Name), "
+                            "and Taxes (Source Tax Code Name -> Uzio Tax Code Description). "
+                            "If the user has not provided these, ASK before calling - do NOT call "
+                            "this tool with an empty list."
+                        ),
+                    },
+                    "mappings_json": {
+                        "type": "string",
+                        "description": (
+                            "Alternative to mapping_file_paths. Flat JSON array of objects with "
+                            "keys Category ('Earnings' | 'Deductions' | 'Contributions' | 'Taxes'), "
+                            "ADP_Name, UZIO_Name. Use only if the user provides mappings inline."
+                        ),
                     },
                     "adp_files_base64": {"type": "array", "items": {"type": "string"}, "description": "Fallback: base64 encoded ADP files"},
                     "uzio_file_base64": {"type": "string", "description": "Fallback: base64 encoded Uzio file"},
@@ -1017,23 +1044,38 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
-            name="paycom_deduction_analyzer",
+            name="paycom_prior_payroll_setup_helper",
             description=(
-                "[VENDOR: Paycom only (two Paycom files)] [scheduled_report_path: Paycom Scheduled "
-                "Deductions Report] [prior_payroll_path: Paycom Prior Payroll]\n"
-                "[DO NOT USE FOR: ADP files or UZIO files - this is a Paycom-internal "
-                "deduction-vs-actual analysis.]\n"
-                "Analyzes Paycom deductions and consolidation plans (scheduled vs. actually deducted)."
+                "[VENDOR: Paycom only (TWO Paycom files required)] "
+                "[prior_payroll_path: Paycom Prior Payroll Register, long format with columns "
+                "EE Code, Type Code, Type Description, Amount, Code Description] "
+                "[scheduled_deductions_path: Paycom Scheduled Deductions Report with columns "
+                "Deduction Code, Deduction Desc, Tax Treatment]\n"
+                "[DO NOT USE FOR: ADP files (use 'adp_prior_payroll_setup_helper'), "
+                "UZIO files, or single-Paycom-file calls - both files are required for the "
+                "complete analysis.]\n\n"
+                "Replaces the deprecated 'paycom_deduction_analyzer' tool. Discovers what to "
+                "configure in Uzio for a fresh Paycom prior payroll migration. Produces a 3-tab "
+                "Excel workbook:\n"
+                "  Tab 1 - What to Set Up (Earnings | Contributions | Deductions, codes only).\n"
+                "  Tab 2 - Pre-Tax vs Post-Tax (read straight from the Tax Treatment column "
+                "of the Scheduled Deductions report - 'B' = Section 125 pre-tax, 'H' = 401k "
+                "traditional pre-tax, 'A' = post-tax).\n"
+                "  Tab 3 - Bonus Verdict (FLSA discretionary vs non-discretionary). "
+                "Strategy A+C: when both plain OT and Paycom's WOT (Weighted Overtime) lines "
+                "exist for the same employee+period, compare them. Any positive WOT-vs-OT gap "
+                "means Paycom rolled a bonus into the regular rate => non-discretionary. When "
+                "the differential test cannot run (only WOT, only OT, or no bonus codes), the "
+                "verdict is 'indeterminate' with a note to supply a Payroll Register Detail "
+                "with hours."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "scheduled_report_path": {"type": "string", "description": PATH_DESC},
-                    "prior_payroll_path": {"type": "string", "description": PATH_DESC},
-                    "config_file_path": {"type": "string", "description": "Optional config file path"},
-                    "scheduled_report_base64": {"type": "string"},
-                    "prior_payroll_base64": {"type": "string"},
-                    "config_file_base64": {"type": "string"},
+                    "prior_payroll_path": {"type": "string", "description": PATH_DESC + " (Paycom Prior Payroll Register, long format)"},
+                    "prior_payroll_base64": {"type": "string", "description": "Fallback: base64 Paycom Prior Payroll Register"},
+                    "scheduled_deductions_path": {"type": "string", "description": PATH_DESC + " (Paycom Scheduled Deductions Report)"},
+                    "scheduled_deductions_base64": {"type": "string", "description": "Fallback: base64 Paycom Scheduled Deductions Report"},
                 },
             },
         ),
@@ -1045,21 +1087,42 @@ async def handle_list_tools() -> list[types.Tool]:
                 "[DO NOT confuse the slots - Paycom file goes in paycom_file_paths, UZIO file "
                 "goes in uzio_file_path.]\n\n"
                 "Performs a complete payroll total comparison between Paycom and Uzio reports, "
-                "producing 6 sheets: Full Comparison, Mismatches Only, Employee Mismatches, "
-                "Duplicate Pay Periods, Pay Stub Counts, and Tax Rate Verification. "
-                "HINT: Always call 'list_audit_files' first to identify the correct paths."
+                "producing up to 7 sheets: Full Comparison, Mismatches Only, Employee Mismatches, "
+                "All Employee Details, Duplicate Pay Periods, Pay Stub Counts, and Tax Rate Verification.\n\n"
+                "[MAPPINGS ARE REQUIRED FOR FULL OUTPUT] Without mappings, only Pay Stub Counts "
+                "and Tax Rate Verification will populate - the four comparison sheets will be "
+                "silently empty and not written to the Excel file. The Streamlit version asks "
+                "the user to upload 4 mapping files (Earnings, Deductions, Contributions, Taxes) "
+                "and you MUST do the equivalent here.\n\n"
+                "[BEFORE CALLING THIS TOOL] If the user has not provided mapping files or "
+                "mappings_json, STOP and ASK them: 'Do you have the 4 mapping files (Earnings, "
+                "Deductions, Contributions, Taxes mapping files - the same ones the Streamlit "
+                "tool asks for)? Please share their paths.' Do NOT proceed with an empty mappings "
+                "list - the resulting report will be missing the comparison sheets and the user "
+                "will think the tool is broken.\n\n"
+                "HINT: Always call 'list_audit_files' first to identify the correct file paths."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "paycom_file_paths": {"type": "array", "items": {"type": "string"}, "description": PATH_DESC},
                     "uzio_file_path": {"type": "string", "description": PATH_DESC},
-                    "mapping_file_paths": {"type": "array", "items": {"type": "string"}, "description": "Local paths to mapping files (Earnings, Deductions, etc.)"},
+                    "mapping_file_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "REQUIRED for full report. Local paths to the 4 mapping files: "
+                            "Earnings, Deductions, Contributions, and Taxes. If the user has not "
+                            "provided these, ASK before calling - do NOT call this tool with an empty list."
+                        ),
+                    },
                     "mappings_json": {
                         "type": "string",
                         "description": (
-                            "Optional: Flat JSON array of mapping objects. Use this if mapping files aren't available."
-                        )
+                            "Alternative to mapping_file_paths. Flat JSON array of objects with "
+                            "keys Category ('Earnings' | 'Deductions' | 'Contributions' | 'Taxes'), "
+                            "ADP_Name (or Paycom code), UZIO_Name. Use only if the user provides mappings inline."
+                        ),
                     },
                     "paycom_files_base64": {"type": "array", "items": {"type": "string"}},
                     "uzio_file_base64": {"type": "string"},
@@ -1758,13 +1821,50 @@ async def handle_call_tool(name: str, arguments: dict | None):
             summary = save_results_to_excel(results, "ADP_Timeoff_Audit")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
-        elif name == "paycom_deduction_analyzer":
-            sched = load_file(arguments, "scheduled_report_path", "scheduled_report_base64")
+        elif name == "paycom_prior_payroll_setup_helper":
             prior = load_file(arguments, "prior_payroll_path", "prior_payroll_base64")
-            config = load_file(arguments, "config_file_path", "config_file_base64") or None
-            results = run_paycom_deduction_analysis(sched, prior, config)
-            summary = save_results_to_excel(results, "Paycom_Deduction_Analysis")
-            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
+            sched = load_file(arguments, "scheduled_deductions_path", "scheduled_deductions_base64")
+            prior_name = arguments.get("prior_payroll_path") or "paycom_prior_payroll.xlsx"
+            sched_name = arguments.get("scheduled_deductions_path") or "paycom_scheduled.xlsx"
+            prior_name = os.path.basename(prior_name.strip().strip('"'))
+            sched_name = os.path.basename(sched_name.strip().strip('"'))
+            require_vendor(prior, prior_name, "paycom", "paycom_prior_payroll_setup_helper (prior payroll)")
+            require_vendor(sched, sched_name, "paycom", "paycom_prior_payroll_setup_helper (scheduled deductions)")
+            results, xlsx_bytes = run_paycom_prior_payroll_setup_helper(
+                prior, prior_name, sched, sched_name,
+            )
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            base = os.path.splitext(prior_name)[0] or "Paycom_Prior_Payroll"
+            if not os.path.exists(AUDIT_INBOX):
+                os.makedirs(AUDIT_INBOX, exist_ok=True)
+            out_path = os.path.join(AUDIT_INBOX, f"{base}_Setup_Helper_{stamp}.xlsx")
+            with open(out_path, "wb") as f:
+                f.write(xlsx_bytes)
+            bonus = results["Bonus"]
+            payload = {
+                "output_file": out_path,
+                "message": (
+                    f"Paycom setup helper produced a 3-tab xlsx in 'Audit Files'. "
+                    f"Tab 1 = What to Set Up, Tab 2 = Pre-Tax vs Post-Tax, "
+                    f"Tab 3 = Bonus Verdict ({bonus['verdict']})."
+                ),
+                "answers": {
+                    "earnings_to_set_up": [f"{r['Type Code']} - {r['Type Description']}"
+                                            for r in results["Earnings_Codes"]],
+                    "contributions_to_set_up": [f"{r['Deduction Code']} - {r['Deduction Desc']}"
+                                                 for r in results["Contributions"]],
+                    "deductions_to_set_up": [f"{r['Deduction Code']} - {r['Deduction Desc']}"
+                                              for r in results["Deductions"]],
+                    "pre_post_tax": [
+                        {"code": r["Code"], "verdict": r["Verdict"], "flavor": r["Flavor"]}
+                        for r in results["Pre_Post_Tax"]
+                    ],
+                    "bonus_verdict": bonus["verdict"],
+                    "bonus_reason": bonus["reason"],
+                },
+            }
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
         elif name == "paycom_total_comparison":
             paycom_data = load_files_list(arguments, "paycom_file_paths", "paycom_files_base64")
