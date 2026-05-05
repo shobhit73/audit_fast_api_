@@ -1557,6 +1557,10 @@ async def handle_call_tool(name: str, arguments: dict | None):
             ]
             fix_options = {k: bool(arguments.get(k, False)) for k in toggle_keys}
             fix_options["fix_inactive"] = fix_options["fix_status"]
+            fix_options["fix_emails"] = True
+            fix_options["fix_job_title"] = True
+            fix_options["fix_dol_status"] = True
+            fix_options["fix_std_hours"] = True
             sort_by_manager = bool(arguments.get("sort_by_manager", False))
             xlsx_bytes, summary = generate_corrected_census_xlsx(
                 content, ADP_FIELD_MAP, fix_options=fix_options,
@@ -1993,7 +1997,11 @@ async def handle_call_tool(name: str, arguments: dict | None):
             ]
             fix_options = {k: bool(arguments.get(k, False)) for k in toggle_keys}
             fix_options["fix_inactive"] = fix_options["fix_status"]
-            fix_options["fix_job_title"] = fix_options["fix_position"]
+            fix_options["fix_position"] = True
+            fix_options["fix_job_title"] = True
+            fix_options["fix_emails"] = True
+            fix_options["fix_dol_status"] = True
+            fix_options["fix_std_hours"] = True
             sort_by_manager = bool(arguments.get("sort_by_manager", False))
             xlsx_bytes, summary = generate_corrected_census_xlsx(
                 content, PAYCOM_FIELD_MAP, fix_options=fix_options,

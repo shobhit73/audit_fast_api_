@@ -156,12 +156,12 @@ try:
             content = await file.read()
             from core.adp.census_audit import ADP_FIELD_MAP
             fix_options = {
-                'fix_flsa': fix_flsa, 'fix_emails': fix_emails, 'fix_job_title': fix_job_title,
+                'fix_flsa': fix_flsa, 'fix_emails': True, 'fix_job_title': True,
                 'fix_driver_smart': fix_driver_smart, 'fix_license': fix_license,
                 'fix_status': fix_status, 'fix_inactive': fix_status, 'fix_type': fix_type,
-                'fix_dol_status': fix_dol_status, 'fix_leave_to_active': fix_leave_to_active,
+                'fix_dol_status': True, 'fix_leave_to_active': fix_leave_to_active,
                 'fix_blank_jt_to_driver': fix_blank_jt_to_driver,
-                'fix_std_hours': fix_std_hours, 'rename_std_hours': rename_std_hours,
+                'fix_std_hours': True, 'rename_std_hours': rename_std_hours,
                 'fix_zip': fix_zip, 'rename_zip_col': rename_zip_col,
                 'replace_gender_col': replace_gender_col,
             }
@@ -202,11 +202,11 @@ try:
             content = await file.read()
             from core.paycom.census_audit import PAYCOM_FIELD_MAP
             fix_options = {
-                'fix_flsa': fix_flsa, 'fix_emails': fix_emails,
+                'fix_flsa': fix_flsa, 'fix_emails': True,
                 'fix_driver_smart': fix_driver_smart, 'fix_license': fix_license,
                 'fix_status': fix_status, 'fix_inactive': fix_status, 'fix_type': fix_type,
-                'fix_position': fix_position, 'fix_job_title': fix_position,
-                'fix_dol_status': fix_dol_status, 'fix_zip': fix_zip,
+                'fix_position': True, 'fix_job_title': True,
+                'fix_dol_status': True, 'fix_std_hours': True, 'fix_zip': fix_zip,
             }
             xlsx_bytes, summary = generate_corrected_census_xlsx(
                 content, PAYCOM_FIELD_MAP, fix_options=fix_options,
