@@ -1,4 +1,5 @@
 import re
+import pandas as pd
 from utils.audit_utils import smart_read_df
 
 STATUS_MATCH = "Data Match"
