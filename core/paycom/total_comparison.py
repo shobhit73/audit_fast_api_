@@ -126,6 +126,9 @@ def calculate_totals_paycom(df, mapping_source_names, filename, uzio_item_name="
         val_desc = raw_desc.lower()
         if val_desc not in norm_mappings:
             continue
+        if code_desc_col and pd.notna(row.get(code_desc_col)):
+            if str(row[code_desc_col]).strip().lower() == "employee benefits":
+                continue
         if "medicare" in val_desc or "social security" in val_desc or "ssc" in val_desc:
             if code_desc_col and pd.notna(row.get(code_desc_col)):
                 code_desc_val = str(row[code_desc_col]).strip().lower()
