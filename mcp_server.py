@@ -590,7 +590,10 @@ async def handle_list_tools() -> list[types.Tool]:
                 "Associate ID, Legal First Name, FLSA Description, etc.]\n"
                 "[DO NOT USE FOR: UZIO Master / UZIO Census Template / Paycom Census - the "
                 "runtime guard will refuse those. For Paycom census use 'paycom_census_sanity'.]\n\n"
-                "Applies opt-in auto-corrections to an ADP Census export. "
+                "Applies ALL auto-corrections automatically to an ADP Census export "
+                "(FLSA alignment, Smart Driver, Status/Type mapping, Zip cleanup, Gender column, "
+                "Email fallback, Manager sorting, Date formatting, etc.). No toggle parameters needed — "
+                "all fixes are always enabled.\n\n"
                 "MANDATORY: For stability, always use copy_to_audit_inbox first and then use 'file_path'. "
                 "Do NOT use 'file_base64' for files > 1MB."
             ),
@@ -600,22 +603,6 @@ async def handle_list_tools() -> list[types.Tool]:
                     "file_path": {"type": "string", "description": PATH_DESC},
                     "file_base64": {"type": "string", "description": "Fallback: base64 encoded ADP Census export"},
                     "filename": {"type": "string"},
-                    "fix_flsa": {"type": "boolean"},
-                    "fix_emails": {"type": "boolean"},
-                    "fix_job_title": {"type": "boolean"},
-                    "fix_driver_smart": {"type": "boolean"},
-                    "fix_license": {"type": "boolean"},
-                    "fix_status": {"type": "boolean"},
-                    "fix_type": {"type": "boolean"},
-                    "fix_dol_status": {"type": "boolean"},
-                    "fix_leave_to_active": {"type": "boolean"},
-                    "fix_blank_jt_to_driver": {"type": "boolean"},
-                    "fix_std_hours": {"type": "boolean"},
-                    "rename_std_hours": {"type": "boolean"},
-                    "fix_zip": {"type": "boolean"},
-                    "rename_zip_col": {"type": "boolean"},
-                    "replace_gender_col": {"type": "boolean"},
-                    "sort_by_manager": {"type": "boolean"},
                 },
             },
         ),
@@ -834,11 +821,8 @@ async def handle_list_tools() -> list[types.Tool]:
                 "[DO NOT USE FOR: UZIO files (this generates UZIO from ADP, not the reverse) "
                 "or Paycom files (use 'paycom_census_generator'). Runtime guard enforces.]\n\n"
                 "Generates a Uzio Census Template (.xlsm) from an ADP Census export. "
-                "Reads ADP columns (e.g. 'Associate ID', 'Legal First Name', "
-                "'FLSA Description'), maps them to the Uzio template's expected headers, "
-                "applies the same auto-correction toggles as the Streamlit "
-                "'ADP - Full Census Generation' tool, and writes the output as a .xlsm to "
-                "the Audit Files inbox.\n\n"
+                "All auto-corrections are applied automatically (FLSA, Status, Type, Zip, "
+                "Email fallback, DOL status, etc.). No toggle parameters needed.\n\n"
                 "WORKFLOW: copy the ADP file with copy_to_audit_inbox first, then pass the "
                 "resulting path as 'file_path'. The output preserves the Uzio template's "
                 "VBA macros, instructions, and all non-data sheets."
@@ -849,14 +833,6 @@ async def handle_list_tools() -> list[types.Tool]:
                     "file_path": {"type": "string", "description": PATH_DESC},
                     "file_base64": {"type": "string", "description": "Fallback: base64-encoded ADP Census export (use only if path unavailable)."},
                     "filename": {"type": "string", "description": "Optional filename hint, used when file_base64 is provided so the loader can pick the right reader (.xlsx vs .csv)."},
-                    "fix_flsa": {"type": "boolean", "description": "Enforce FLSA/Pay Type alignment (Hourly→Non-Exempt, Salaried→Exempt; blank→Non-Exempt)."},
-                    "fix_emails": {"type": "boolean", "description": "Use Personal Email when Work Email is blank."},
-                    "fix_status": {"type": "boolean", "description": "Map Position Status to ACTIVE / TERMINATED / EXCLUDE; 'not hired' rows are dropped."},
-                    "fix_inactive": {"type": "boolean", "description": "Map 'Inactive' to TERMINATED only when a Termination Date exists, else ACTIVE."},
-                    "fix_type": {"type": "boolean", "description": "Map Worker Category to Full Time / Part Time / Seasonal / Other."},
-                    "fix_zip": {"type": "boolean", "description": "Pad 4-digit zips and trim to 5 digits."},
-                    "fix_license": {"type": "boolean", "description": "Clear license expiration when license number is missing or 00/00/0000."},
-                    "fix_dol_status": {"type": "boolean", "description": "Default blank Employment Type to 'Full Time'."},
                 },
             },
         ),
@@ -869,11 +845,8 @@ async def handle_list_tools() -> list[types.Tool]:
                 "[DO NOT USE FOR: ADP files (use 'adp_census_generator') or UZIO files - "
                 "the runtime guard will refuse non-Paycom inputs.]\n\n"
                 "Generates a Uzio Census Template (.xlsm) from a Paycom Census export. "
-                "Reads Paycom columns (e.g. 'Employee_Code', 'Legal_Firstname', "
-                "'Exempt_Status'), maps them to the Uzio template's expected headers, "
-                "applies the same auto-correction toggles as the Streamlit "
-                "'Paycom - Full Census Generation' tool, and writes the output as a "
-                ".xlsm to the Audit Files inbox.\n\n"
+                "All auto-corrections are applied automatically (FLSA, Status, Type, Position, "
+                "DOL status, Zip, Email fallback, etc.). No toggle parameters needed.\n\n"
                 "WORKFLOW: copy the Paycom file with copy_to_audit_inbox first, then "
                 "pass the resulting path as 'file_path'. The output preserves the Uzio "
                 "template's VBA macros, instructions, and all non-data sheets."
@@ -884,15 +857,6 @@ async def handle_list_tools() -> list[types.Tool]:
                     "file_path": {"type": "string", "description": PATH_DESC},
                     "file_base64": {"type": "string", "description": "Fallback: base64-encoded Paycom Census export (use only if path unavailable)."},
                     "filename": {"type": "string", "description": "Optional filename hint, used when file_base64 is provided."},
-                    "fix_flsa": {"type": "boolean", "description": "Enforce FLSA/Pay Type alignment."},
-                    "fix_emails": {"type": "boolean", "description": "Use Personal_Email when Work_Email is blank."},
-                    "fix_status": {"type": "boolean", "description": "Map Employee_Status to ACTIVE / TERMINATED / EXCLUDE."},
-                    "fix_inactive": {"type": "boolean", "description": "Map 'Inactive' to TERMINATED only when a Termination_Date exists, else ACTIVE."},
-                    "fix_type": {"type": "boolean", "description": "Map DOL_Status to Full Time / Part Time / Seasonal / Other."},
-                    "fix_position": {"type": "boolean", "description": "Auto-fill blank Job Title (Position) from Department_Desc."},
-                    "fix_dol_status": {"type": "boolean", "description": "Default blank DOL_Status (Employment Type) to 'Full Time'."},
-                    "fix_zip": {"type": "boolean", "description": "Pad 4-digit zips and trim to 5 digits."},
-                    "fix_license": {"type": "boolean", "description": "Clear license expiration when DriversLicense is missing or 00/00/0000."},
                 },
             },
         ),
@@ -1264,7 +1228,10 @@ async def handle_list_tools() -> list[types.Tool]:
                 "Employee_Code, SS_Number, Department_Desc, DOL_Status, etc.]\n"
                 "[DO NOT USE FOR: ADP Census (use 'adp_census_sanity') or UZIO files - the "
                 "runtime guard will refuse non-Paycom inputs.]\n\n"
-                "Applies opt-in auto-corrections to a Paycom Census export. "
+                "Applies ALL auto-corrections automatically to a Paycom Census export "
+                "(FLSA alignment, Smart Driver, Status/Type mapping, Zip cleanup, "
+                "Email fallback, Position fill, Manager sorting, Date formatting, etc.). "
+                "No toggle parameters needed — all fixes are always enabled.\n\n"
                 "MANDATORY: For stability, always use copy_to_audit_inbox first and then use 'file_path'. "
                 "Do NOT use 'file_base64' for files > 1MB."
             ),
@@ -1274,16 +1241,6 @@ async def handle_list_tools() -> list[types.Tool]:
                     "file_path": {"type": "string", "description": PATH_DESC},
                     "file_base64": {"type": "string", "description": "Fallback: base64 encoded Paycom Census export"},
                     "filename": {"type": "string"},
-                    "fix_flsa": {"type": "boolean", "description": "Enforce FLSA/Pay Type alignment — fill blank FLSA from Hourly/Salaried."},
-                    "fix_emails": {"type": "boolean", "description": "Use Personal Email as fallback when Work Email is blank."},
-                    "fix_driver_smart": {"type": "boolean", "description": "Smart Driver Correction: if Dept/Job indicates Driver, fill Job/FLSA/Pay Type."},
-                    "fix_license": {"type": "boolean", "description": "Strict license validation — clear license dates if number is missing."},
-                    "fix_status": {"type": "boolean", "description": "Auto-map Employment Status (e.g. Inactive -> Terminated)."},
-                    "fix_type": {"type": "boolean", "description": "Auto-map Worker Category (e.g. Intern -> Part Time)."},
-                    "fix_position": {"type": "boolean", "description": "Auto-Fill blank Position with Department Description."},
-                    "fix_dol_status": {"type": "boolean", "description": "Auto-fill blank DOL_Status to 'Full-Time' for active employees."},
-                    "fix_zip": {"type": "boolean", "description": "Auto-fix Zip Code (pad 4-digits and trim to 5-digits)."},
-                    "sort_by_manager": {"type": "boolean", "description": "Cluster managers and their reportees at the top of the output."},
                 },
             },
         ),
@@ -1549,22 +1506,19 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 if arguments.get("file_path") else "upload.xlsx"
             )
             require_vendor(content, filename, "adp", "adp_census_sanity")
-            toggle_keys = [
-                "fix_flsa", "fix_emails", "fix_job_title", "fix_driver_smart", "fix_license",
-                "fix_status", "fix_type", "fix_dol_status", "fix_leave_to_active",
-                "fix_blank_jt_to_driver", "fix_std_hours", "rename_std_hours",
-                "fix_zip", "rename_zip_col", "replace_gender_col",
-            ]
-            fix_options = {k: bool(arguments.get(k, False)) for k in toggle_keys}
-            fix_options["fix_inactive"] = fix_options["fix_status"]
-            fix_options["fix_emails"] = True
-            fix_options["fix_job_title"] = True
-            fix_options["fix_dol_status"] = True
-            fix_options["fix_std_hours"] = True
-            sort_by_manager = bool(arguments.get("sort_by_manager", False))
+            fix_options = {
+                'fix_flsa': True, 'fix_emails': True, 'fix_job_title': True,
+                'fix_driver_smart': True, 'fix_license': True,
+                'fix_status': True, 'fix_inactive': True, 'fix_type': True,
+                'fix_dol_status': True, 'fix_leave_to_active': True,
+                'fix_blank_jt_to_driver': True,
+                'fix_std_hours': True, 'rename_std_hours': True,
+                'fix_zip': True, 'rename_zip_col': True,
+                'replace_gender_col': True,
+            }
             xlsx_bytes, summary = generate_corrected_census_xlsx(
                 content, ADP_FIELD_MAP, fix_options=fix_options,
-                filename=filename, sort_by_manager=sort_by_manager,
+                filename=filename, sort_by_manager=True,
             )
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -1789,11 +1743,11 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 (arguments.get("file_path") or "adp_census.xlsx").strip().strip('"')
             )
             require_vendor(content, filename, "adp", "adp_census_generator")
-            toggle_keys = [
-                "fix_flsa", "fix_emails", "fix_status", "fix_inactive",
-                "fix_type", "fix_zip", "fix_license", "fix_dol_status",
-            ]
-            fix_options = {k: bool(arguments.get(k, False)) for k in toggle_keys}
+            fix_options = {
+                'fix_flsa': True, 'fix_emails': True, 'fix_status': True,
+                'fix_inactive': True, 'fix_type': True, 'fix_zip': True,
+                'fix_license': True, 'fix_dol_status': True,
+            }
             xlsm_bytes, summary = run_adp_census_generation(content, filename, fix_options=fix_options)
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -1816,11 +1770,11 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 (arguments.get("file_path") or "paycom_census.xlsx").strip().strip('"')
             )
             require_vendor(content, filename, "paycom", "paycom_census_generator")
-            toggle_keys = [
-                "fix_flsa", "fix_emails", "fix_status", "fix_inactive",
-                "fix_type", "fix_position", "fix_dol_status", "fix_zip", "fix_license",
-            ]
-            fix_options = {k: bool(arguments.get(k, False)) for k in toggle_keys}
+            fix_options = {
+                'fix_flsa': True, 'fix_emails': True, 'fix_status': True,
+                'fix_inactive': True, 'fix_type': True, 'fix_position': True,
+                'fix_dol_status': True, 'fix_zip': True, 'fix_license': True,
+            }
             xlsm_bytes, summary = run_paycom_census_generation(content, filename, fix_options=fix_options)
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -1991,21 +1945,15 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 if arguments.get("file_path") else "upload.xlsx"
             )
             require_vendor(content, filename, "paycom", "paycom_census_sanity")
-            toggle_keys = [
-                "fix_flsa", "fix_emails", "fix_driver_smart", "fix_license",
-                "fix_status", "fix_type", "fix_position", "fix_dol_status", "fix_zip",
-            ]
-            fix_options = {k: bool(arguments.get(k, False)) for k in toggle_keys}
-            fix_options["fix_inactive"] = fix_options["fix_status"]
-            fix_options["fix_position"] = True
-            fix_options["fix_job_title"] = True
-            fix_options["fix_emails"] = True
-            fix_options["fix_dol_status"] = True
-            fix_options["fix_std_hours"] = True
-            sort_by_manager = bool(arguments.get("sort_by_manager", False))
+            fix_options = {
+                'fix_flsa': True, 'fix_emails': True, 'fix_driver_smart': True,
+                'fix_license': True, 'fix_status': True, 'fix_inactive': True,
+                'fix_type': True, 'fix_position': True, 'fix_job_title': True,
+                'fix_dol_status': True, 'fix_std_hours': True, 'fix_zip': True,
+            }
             xlsx_bytes, summary = generate_corrected_census_xlsx(
                 content, PAYCOM_FIELD_MAP, fix_options=fix_options,
-                filename=filename, sort_by_manager=sort_by_manager,
+                filename=filename, sort_by_manager=True,
             )
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")

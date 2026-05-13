@@ -4,6 +4,22 @@ import re
 import numpy as np
 from datetime import datetime, date
 
+# --- Monkeypatch for openpyxl to avoid Invalid datetime value errors ---
+import openpyxl.cell.cell
+if not hasattr(openpyxl.cell.cell.Cell, '_patched_for_datetime'):
+    _orig_bind_value = openpyxl.cell.cell.Cell._bind_value
+    def _safe_bind_value(self, value):
+        try:
+            _orig_bind_value(self, value)
+        except ValueError as e:
+            if "Invalid datetime value" in str(e):
+                self.data_type = 's'
+                self._value = str(value)
+            else:
+                raise
+    openpyxl.cell.cell.Cell._bind_value = _safe_bind_value
+    openpyxl.cell.cell.Cell._patched_for_datetime = True
+# -----------------------------------------------------------------------
 # --- Constants from the original utils ---
 UZIO_RAW_MAPPING = {
     'Employee ID*': 'Employee ID',
@@ -100,7 +116,8 @@ def smart_read_df(content, filename="", sheet_name=None, header='infer', require
                             if all(any(col.lower() in v for v in row_vals) for col in fallback_columns):
                                 return pd.read_excel(xls, sheet_name=sheet, header=idx, **kwargs)
                 else:
-                    return pd.read_excel(xls, sheet_name=sheet, header=header, **kwargs)
+                    excel_header = 0 if header == 'infer' else header
+                    return pd.read_excel(xls, sheet_name=sheet, header=excel_header, **kwargs)
         except Exception:
             pass
 

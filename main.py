@@ -134,41 +134,25 @@ try:
     @app.post("/audit/adp/census-sanity")
     async def adp_census_sanity(
         file: UploadFile = File(...),
-        # Auto-correction toggles (mirror of Streamlit ADP Sanity tool — all default OFF)
-        fix_flsa: bool = Form(False),
-        fix_emails: bool = Form(False),
-        fix_job_title: bool = Form(False),
-        fix_driver_smart: bool = Form(False),
-        fix_license: bool = Form(False),
-        fix_status: bool = Form(False),
-        fix_type: bool = Form(False),
-        fix_dol_status: bool = Form(False),
-        fix_leave_to_active: bool = Form(False),
-        fix_blank_jt_to_driver: bool = Form(False),
-        fix_std_hours: bool = Form(False),
-        rename_std_hours: bool = Form(False),
-        fix_zip: bool = Form(False),
-        rename_zip_col: bool = Form(False),
-        replace_gender_col: bool = Form(False),
-        sort_by_manager: bool = Form(False),
     ):
+        """All corrections are applied automatically — no user toggles needed."""
         try:
             content = await file.read()
             from core.adp.census_audit import ADP_FIELD_MAP
             fix_options = {
-                'fix_flsa': fix_flsa, 'fix_emails': True, 'fix_job_title': True,
-                'fix_driver_smart': fix_driver_smart, 'fix_license': fix_license,
-                'fix_status': fix_status, 'fix_inactive': fix_status, 'fix_type': fix_type,
-                'fix_dol_status': True, 'fix_leave_to_active': fix_leave_to_active,
-                'fix_blank_jt_to_driver': fix_blank_jt_to_driver,
-                'fix_std_hours': True, 'rename_std_hours': rename_std_hours,
-                'fix_zip': fix_zip, 'rename_zip_col': rename_zip_col,
-                'replace_gender_col': replace_gender_col,
+                'fix_flsa': True, 'fix_emails': True, 'fix_job_title': True,
+                'fix_driver_smart': True, 'fix_license': True,
+                'fix_status': True, 'fix_inactive': True, 'fix_type': True,
+                'fix_dol_status': True, 'fix_leave_to_active': True,
+                'fix_blank_jt_to_driver': True,
+                'fix_std_hours': True, 'rename_std_hours': True,
+                'fix_zip': True, 'rename_zip_col': True,
+                'replace_gender_col': True,
             }
             xlsx_bytes, summary = generate_corrected_census_xlsx(
                 content, ADP_FIELD_MAP, fix_options=fix_options,
                 filename=file.filename or "upload.xlsx",
-                sort_by_manager=sort_by_manager,
+                sort_by_manager=True,
             )
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -186,32 +170,22 @@ try:
     @app.post("/audit/paycom/census-sanity")
     async def paycom_census_sanity(
         file: UploadFile = File(...),
-        # Auto-correction toggles (mirror of Streamlit Paycom Sanity tool — all default OFF)
-        fix_flsa: bool = Form(False),
-        fix_emails: bool = Form(False),
-        fix_driver_smart: bool = Form(False),
-        fix_license: bool = Form(False),
-        fix_status: bool = Form(False),
-        fix_type: bool = Form(False),
-        fix_position: bool = Form(False),
-        fix_dol_status: bool = Form(False),
-        fix_zip: bool = Form(False),
-        sort_by_manager: bool = Form(False),
     ):
+        """All corrections are applied automatically — no user toggles needed."""
         try:
             content = await file.read()
             from core.paycom.census_audit import PAYCOM_FIELD_MAP
             fix_options = {
-                'fix_flsa': fix_flsa, 'fix_emails': True,
-                'fix_driver_smart': fix_driver_smart, 'fix_license': fix_license,
-                'fix_status': fix_status, 'fix_inactive': fix_status, 'fix_type': fix_type,
+                'fix_flsa': True, 'fix_emails': True,
+                'fix_driver_smart': True, 'fix_license': True,
+                'fix_status': True, 'fix_inactive': True, 'fix_type': True,
                 'fix_position': True, 'fix_job_title': True,
-                'fix_dol_status': True, 'fix_std_hours': True, 'fix_zip': fix_zip,
+                'fix_dol_status': True, 'fix_std_hours': True, 'fix_zip': True,
             }
             xlsx_bytes, summary = generate_corrected_census_xlsx(
                 content, PAYCOM_FIELD_MAP, fix_options=fix_options,
                 filename=file.filename or "upload.xlsx",
-                sort_by_manager=sort_by_manager,
+                sort_by_manager=True,
             )
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
