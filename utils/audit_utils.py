@@ -431,19 +431,14 @@ def generate_uzio_template(df_source, vendor_field_map, fix_options=None):
 
                     if fix_options and fix_options.get('fix_status', False):
                         if 'not hired' in s: return 'EXCLUDE'
-                        if 'leave' in s: return 'ACTIVE'
-                        if 'term' in s: return 'TERMINATED'
-                        if 'active' in s: return 'ACTIVE'
-
-                    if fix_options and fix_options.get('fix_inactive', False):
-                        if 'inactive' in s:
+                        if 'leave' in s or 'inactive' in s:
                             term_col = vendor_field_map.get('Termination Date')
                             if term_col and pd.notna(row.get(term_col)) and str(row.get(term_col)).strip() != "":
                                 return 'TERMINATED'
                             return 'ACTIVE'
-                    elif 'inactive' in s:
-                        return 'INACTIVE'
-
+                        if 'term' in s: return 'TERMINATED'
+                        if 'active' in s: return 'ACTIVE'
+                    
                     return str(x).strip().upper()
                 series = df_source.apply(format_status, axis=1)
             elif std_name in ['Zip', 'Mailing Zip']:
@@ -846,8 +841,15 @@ def selective_update_uzio(df_source, df_template, selected_uzio_cols, vendor_fie
                     s = str(val).lower()
                     if fix_options.get('fix_status', False):
                         if 'not hired' in s: formatted_val = 'EXCLUDE'
-                        elif 'inactive' in s or 'term' in s: formatted_val = 'TERMINATED'
-                        elif 'active' in s or 'leave' in s: formatted_val = 'ACTIVE'
+                        elif 'inactive' in s or 'leave' in s:
+                            term_col = vendor_field_map.get('Termination Date')
+                            t_val = str(source_row_data.get(term_col, "")).strip() if term_col else ""
+                            if t_val and t_val.lower() != "nan":
+                                formatted_val = 'TERMINATED'
+                            else:
+                                formatted_val = 'ACTIVE'
+                        elif 'term' in s: formatted_val = 'TERMINATED'
+                        elif 'active' in s: formatted_val = 'ACTIVE'
                         else: formatted_val = str(val).strip().upper()
                     else:
                         formatted_val = str(val).strip().upper()

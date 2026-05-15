@@ -168,10 +168,17 @@ def _validate_for_warnings(df_source, resolved_field_map):
                 problems.append("Employment Status (blank)")
             else:
                 sv_l = str(sv).strip().lower()
-                is_term = sv_l in ['t', 'i'] or any(s in sv_l for s in ['terminated', 'inactive'])
+                is_special = 'leave' in sv_l or 'inactive' in sv_l
+                is_term = sv_l in ['t'] or any(s in sv_l for s in ['terminated'])
+                
+                if is_special and term_date_col and term_date_col in df_source.columns:
+                    if _is_blank(row.get(term_date_col)):
+                        problems.append("Please make them excluded from payroll on Uzio")
+
                 if is_term and term_date_col and term_date_col in df_source.columns:
                     if _is_blank(row.get(term_date_col)):
-                        problems.append("Terminated/Inactive but missing Termination Date")
+                        problems.append("Terminated but missing Termination Date")
+                
                 is_standard = sv_l in ['a', 't', 'i'] or any(s in sv_l for s in ['active', 'terminated', 'inactive', 'leave'])
                 if not is_standard:
                     problems.append(f"Non-standard Status ({str(sv).strip()})")
@@ -284,13 +291,22 @@ def generate_corrected_census_xlsx(content, field_map_dict, fix_options=None,
         c_term = resolved_field_map.get('Termination Date')
         if c_pos and c_term and c_pos in df_download.columns and c_term in df_download.columns:
             pos_lower = df_download[c_pos].astype(str).str.strip().str.lower()
-            mask_leave = pos_lower == "leave"
+            mask_special = pos_lower.str.contains('leave|inactive', na=False)
             mask_term_blank = _is_blank_series(c_term)
-            for idx in df_download[mask_leave & mask_term_blank].index:
+            
+            # Case A: Special Status & No Term Date -> Active (Exclude from Payroll)
+            for idx in df_download[mask_special & mask_term_blank].index:
                 old_p = df_download.at[idx, c_pos]
                 df_download.at[idx, c_pos] = "Active"
-                log_change(idx, "Position Status", old_p, "Active",
-                           "Reclassified 'Leave' to 'Active' because Termination Date is blank.")
+                log_change(idx, "Employment Status", old_p, "Active",
+                           "Please make it exclude from payroll in Uzio")
+            
+            # Case B: Special Status & HAS Term Date -> Terminated
+            for idx in df_download[mask_special & ~mask_term_blank].index:
+                old_p = df_download.at[idx, c_pos]
+                df_download.at[idx, c_pos] = "Terminated"
+                log_change(idx, "Employment Status", old_p, "Terminated",
+                           "Converted to 'Terminated' due to presence of Termination Date.")
 
     # 3. DOL Status default Full Time
     if fix_options.get('fix_dol_status'):
