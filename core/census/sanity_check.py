@@ -18,7 +18,7 @@ import io
 import re
 import pandas as pd
 
-from utils.audit_utils import norm_colname, norm_blank, norm_ssn_canonical
+from utils.audit_utils import norm_colname, norm_blank, norm_ssn_canonical, is_hourly_only_job_title
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +351,8 @@ def generate_corrected_census_xlsx(content, field_map_dict, fix_options=None,
                     df_download.at[idx, c_flsa] = "Exempt"
                     log_change(idx, "FLSA Status", old_f, "Exempt", "Applied based on Salaried/Salary pay type.")
 
-    # 6. Smart Driver chain
+    # 6. Smart Driver chain — whole-word match against the hourly-only roster
+    # (Driver, Walker, Helper, DDU Dedicated, etc.), not raw "driver" substring.
     if fix_options.get('fix_driver_smart'):
         c_jt = resolved_field_map.get('Job Title')
         c_dept = resolved_field_map.get('Department')
@@ -360,21 +361,21 @@ def generate_corrected_census_xlsx(content, field_map_dict, fix_options=None,
         if (c_jt and c_dept and c_flsa and
                 c_jt in df_download.columns and c_dept in df_download.columns and c_flsa in df_download.columns):
             mask_jt_blank = _is_blank_series(c_jt)
-            mask_dept_driver = df_download[c_dept].astype(str).str.lower().str.contains("driver", na=False)
+            mask_dept_driver = df_download[c_dept].apply(is_hourly_only_job_title)
             for idx in df_download[mask_jt_blank & mask_dept_driver].index:
                 old_j = df_download.at[idx, c_jt]
                 new_j = df_download.at[idx, c_dept]
                 df_download.at[idx, c_jt] = new_j
                 log_change(idx, "Job Title (Smart Driver)", old_j, new_j,
-                           "Automatically assigned 'Driver' title from Department.")
+                           "Automatically assigned Driver/Hourly-only title from Department.")
 
-            mask_job_driver = df_download[c_jt].astype(str).str.lower().str.contains("driver", na=False)
+            mask_job_driver = df_download[c_jt].apply(is_hourly_only_job_title)
             mask_flsa_blank = _is_blank_series(c_flsa)
             for idx in df_download[mask_job_driver & mask_flsa_blank].index:
                 old_f = df_download.at[idx, c_flsa]
                 df_download.at[idx, c_flsa] = "Non-Exempt"
                 log_change(idx, "FLSA Classification (Smart Driver)", old_f, "Non-Exempt",
-                           "Automatic Non-Exempt status for Driver roles.")
+                           "Automatic Non-Exempt status for Driver/Hourly-only roles.")
 
             if c_pt and c_pt in df_download.columns:
                 mask_pt_blank = _is_blank_series(c_pt)
@@ -382,7 +383,7 @@ def generate_corrected_census_xlsx(content, field_map_dict, fix_options=None,
                     old_p = df_download.at[idx, c_pt]
                     df_download.at[idx, c_pt] = "Hourly"
                     log_change(idx, "Pay Type (Smart Driver)", old_p, "Hourly",
-                               "Automatic Hourly pay type for Driver roles.")
+                               "Automatic Hourly pay type for Driver/Hourly-only roles.")
 
     # 7. Generic blank-Job-Title -> Driver fallback (Non-Exempt + Hourly)
     if fix_options.get('fix_blank_jt_to_driver'):

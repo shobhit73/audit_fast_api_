@@ -69,6 +69,14 @@ HOURLY_ONLY_JOB_TITLES = {
     "delivery associates", "driver -major appliance"
 }
 
+# Whole-word, case-insensitive regex over the title set above.
+# Matches "Lead Driver" via "driver" but NOT "Drivership"; matches "Dog Walker"
+# via "walker" but NOT "Sidewalker".
+_HOURLY_ONLY_JOB_TITLE_REGEX = re.compile(
+    r'\b(?:' + '|'.join(re.escape(t) for t in sorted(HOURLY_ONLY_JOB_TITLES, key=len, reverse=True)) + r')\b',
+    re.IGNORECASE,
+)
+
 # --- Core Utility Functions ---
 
 def clean_money_val(x):
@@ -283,8 +291,14 @@ def read_uzio_raw_file(content):
         return pd.DataFrame()
 
 def is_hourly_only_job_title(jt_val: str) -> bool:
-    jt = jt_val.strip().lower()
-    return jt in HOURLY_ONLY_JOB_TITLES or jt.endswith("driver")
+    """Return True if the job title contains any canonical hourly-only role
+    name as a whole word (case-insensitive)."""
+    if jt_val is None:
+        return False
+    s = str(jt_val).strip()
+    if not s or s.lower() == "nan":
+        return False
+    return bool(_HOURLY_ONLY_JOB_TITLE_REGEX.search(s))
 
 def get_identity_match_map(df_uzio, df_vendor, uzio_id_col, vendor_id_col, uzio_ssn_col, vendor_ssn_col):
     """Maps Uzio employee IDs to vendor IDs via SSN matching."""
@@ -378,10 +392,17 @@ def generate_uzio_template(df_source, vendor_field_map, fix_options=None):
     df_uzio = pd.DataFrame(columns=uzio_headers)
 
     for uzio_header, std_name in UZIO_RAW_MAPPING.items():
-        # These three are populated by the caller via the Job/Location mapping UI;
-        # leave blank here so the caller can write the user-edited values.
+        # Job Title / Department / Work Location: populate from source so the
+        # driver-mask check below can see real values. The caller overwrites
+        # these with the user-mapping dict (core/{adp,paycom}/census_generator.py)
+        # after this function returns, so the final output still respects the
+        # user's mapping — but driver detection now works.
         if std_name in ['Job Title', 'Department', 'Work Location']:
-            df_uzio[uzio_header] = ""
+            vendor_col = vendor_field_map.get(std_name)
+            if vendor_col and vendor_col in df_source.columns:
+                df_uzio[uzio_header] = df_source[vendor_col].fillna("").astype(str).str.strip().values
+            else:
+                df_uzio[uzio_header] = ""
             continue
 
         vendor_col = vendor_field_map.get(std_name)
@@ -573,16 +594,19 @@ def generate_uzio_template(df_source, vendor_field_map, fix_options=None):
 
     # Pay-Type / FLSA rules
     if 'Pay Type*' in df_uzio.columns:
-        # Driver special case: force Hourly + Non-Exempt
+        # Rule 1 (highest precedence): If Job Title matches the hourly-only
+        # roster (Driver, Walker, Helper, DDU Dedicated, etc. — whole-word,
+        # case-insensitive), force Pay Type = Hourly and FLSA = Non-Exempt
+        # regardless of source values.
         if 'Job Title' in df_uzio.columns:
-            driver_mask = df_uzio['Job Title'].astype(str).str.lower().str.contains('driver', na=False)
+            driver_mask = df_uzio['Job Title'].apply(is_hourly_only_job_title)
             pt_to_fix = driver_mask & ((df_uzio['Pay Type*'].astype(str).str.lower().str.strip() != 'hourly') | df_uzio['Pay Type*'].isna() | (df_uzio['Pay Type*'] == ""))
             for idx in df_uzio[pt_to_fix].index:
                 cur = df_uzio.loc[idx, 'Pay Type*']
                 fix_logs.append({
                     "Employee": emp_ids[idx], "Field Fixed": "Pay Type*",
                     "Original Value": cur if pd.notna(cur) and str(cur).strip() else "(Blank)",
-                    "New Value": "Hourly", "Fix Applied": "Forced Hourly for Driver Position"
+                    "New Value": "Hourly", "Fix Applied": "Forced Hourly for Driver/Hourly-only Position"
                 })
             df_uzio.loc[driver_mask, 'Pay Type*'] = "Hourly"
 
@@ -593,9 +617,11 @@ def generate_uzio_template(df_source, vendor_field_map, fix_options=None):
                     fix_logs.append({
                         "Employee": emp_ids[idx], "Field Fixed": "FLSA Classification",
                         "Original Value": cur if pd.notna(cur) and str(cur).strip() else "(Blank)",
-                        "New Value": "Non-Exempt", "Fix Applied": "Forced Non-Exempt for Driver Position"
+                        "New Value": "Non-Exempt", "Fix Applied": "Forced Non-Exempt for Driver/Hourly-only Position"
                     })
                 df_uzio.loc[driver_mask, 'FLSA Classification'] = "Non-Exempt"
+        else:
+            driver_mask = pd.Series(False, index=df_uzio.index)
 
         pay_type_series = df_uzio['Pay Type*'].astype(str).str.lower().str.strip()
 
@@ -603,9 +629,6 @@ def generate_uzio_template(df_source, vendor_field_map, fix_options=None):
         df_uzio.loc[hourly_mask, 'Pay Type*'] = "Hourly"
         if 'Annual Salary(Digits)**' in df_uzio.columns:
             df_uzio.loc[hourly_mask, 'Annual Salary(Digits)**'] = ""
-            if fix_options and fix_options.get('fix_flsa', False):
-                if 'FLSA Classification' in df_uzio.columns:
-                    df_uzio.loc[hourly_mask, 'FLSA Classification'] = "Non-Exempt"
 
         salary_mask = pay_type_series.str.contains('salar', na=False)
         df_uzio.loc[salary_mask, 'Pay Type*'] = "Salaried"
@@ -615,11 +638,43 @@ def generate_uzio_template(df_source, vendor_field_map, fix_options=None):
         if 'Working Hours per Week(Digits)**' in df_uzio.columns:
             df_uzio.loc[salary_mask, 'Working Hours per Week(Digits)**'] = ""
 
+        # Rules 2-4: FLSA fill-by-Pay-Type — BLANKS ONLY, never overwrite a
+        # source FLSA value. Driver rule (above) already covered its rows.
         if fix_options and fix_options.get('fix_flsa', False):
             if 'FLSA Classification' in df_uzio.columns:
-                df_uzio.loc[salary_mask, 'FLSA Classification'] = "Exempt"
-                blank_flsa_mask = df_uzio['FLSA Classification'].isna() | (df_uzio['FLSA Classification'].astype(str).str.strip() == "")
-                df_uzio.loc[blank_flsa_mask, 'FLSA Classification'] = "Non-Exempt"
+                blank_flsa_mask = df_uzio['FLSA Classification'].isna() | (df_uzio['FLSA Classification'].astype(str).str.strip() == "") | (df_uzio['FLSA Classification'].astype(str).str.strip().str.lower() == "nan")
+
+                # Rule 3: blank FLSA + Hourly + not Driver → Non-Exempt
+                hourly_fill_mask = blank_flsa_mask & hourly_mask & ~driver_mask
+                for idx in df_uzio[hourly_fill_mask].index:
+                    fix_logs.append({
+                        "Employee": emp_ids[idx], "Field Fixed": "FLSA Classification",
+                        "Original Value": "(Blank)", "New Value": "Non-Exempt",
+                        "Fix Applied": "Filled blank FLSA based on Hourly Pay Type"
+                    })
+                df_uzio.loc[hourly_fill_mask, 'FLSA Classification'] = "Non-Exempt"
+
+                # Rule 2: blank FLSA + Salaried + not Driver → Exempt
+                salary_fill_mask = blank_flsa_mask & salary_mask & ~driver_mask
+                for idx in df_uzio[salary_fill_mask].index:
+                    fix_logs.append({
+                        "Employee": emp_ids[idx], "Field Fixed": "FLSA Classification",
+                        "Original Value": "(Blank)", "New Value": "Exempt",
+                        "Fix Applied": "Filled blank FLSA based on Salaried Pay Type"
+                    })
+                df_uzio.loc[salary_fill_mask, 'FLSA Classification'] = "Exempt"
+
+                # Rule 4: still-blank FLSA + not Driver + Pay Type also blank/unknown
+                # → cannot determine. Leave blank, surface in change log.
+                still_blank_mask = (df_uzio['FLSA Classification'].isna() | (df_uzio['FLSA Classification'].astype(str).str.strip() == "")) & ~driver_mask
+                for idx in df_uzio[still_blank_mask].index:
+                    pt_cur = df_uzio.loc[idx, 'Pay Type*'] if pd.notna(df_uzio.loc[idx, 'Pay Type*']) and str(df_uzio.loc[idx, 'Pay Type*']).strip() else "(Blank)"
+                    fix_logs.append({
+                        "Employee": emp_ids[idx], "Field Fixed": "FLSA Classification",
+                        "Original Value": "(Blank)", "New Value": "(Blank — Not Filled)",
+                        "Fix Applied": f"Cannot derive FLSA — source FLSA is blank, Job Title is not in Driver/Hourly-only list, and Pay Type is '{pt_cur}'. Manual review required."
+                    })
+                # Intentionally do NOT default to Non-Exempt — leave blank.
 
     df_uzio.attrs['fix_logs'] = pd.DataFrame(fix_logs) if fix_logs else pd.DataFrame(
         columns=["Employee", "Field Fixed", "Original Value", "New Value", "Fix Applied"]
