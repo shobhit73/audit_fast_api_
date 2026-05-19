@@ -335,21 +335,50 @@ def generate_corrected_census_xlsx(content, field_map_dict, fix_options=None,
                     log_change(idx, "Job Title", old_val, new_val,
                                "Position was blank; filled using Department Description.")
 
-    # 5. FLSA from Pay Type
+    # 5. FLSA precedence — Rule 1 (Driver/Hourly-only override) wins,
+    #    then Rules 2-3 (blanks-only fill via Pay Type), then Rule 4
+    #    (cannot determine -> leave blank + log manual review).
     if fix_options.get('fix_flsa'):
         c_flsa = resolved_field_map.get('FLSA Classification')
         c_pt = resolved_field_map.get('Pay Type')
-        if c_flsa and c_pt and c_flsa in df_download.columns and c_pt in df_download.columns:
-            mask_blank = _is_blank_series(c_flsa)
-            for idx in df_download[mask_blank].index:
-                pt_val = str(df_download.at[idx, c_pt]).lower().strip()
-                old_f = df_download.at[idx, c_flsa]
-                if 'hour' in pt_val:
-                    df_download.at[idx, c_flsa] = "Non-Exempt"
-                    log_change(idx, "FLSA Status", old_f, "Non-Exempt", "Applied based on Hourly pay type.")
-                elif 'salar' in pt_val:
-                    df_download.at[idx, c_flsa] = "Exempt"
-                    log_change(idx, "FLSA Status", old_f, "Exempt", "Applied based on Salaried/Salary pay type.")
+        c_jt = resolved_field_map.get('Job Title')
+        if c_flsa and c_flsa in df_download.columns:
+            # Rule 1: Driver / hourly-only Job Title forces Pay Type = Hourly
+            # + FLSA = Non-Exempt, overwriting source values.
+            mask_jt_driver = pd.Series(False, index=df_download.index)
+            if c_jt and c_jt in df_download.columns:
+                mask_jt_driver = df_download[c_jt].apply(is_hourly_only_job_title)
+                for idx in df_download[mask_jt_driver].index:
+                    old_f = df_download.at[idx, c_flsa]
+                    cur_lower = str(old_f).strip().lower() if pd.notna(old_f) else ""
+                    if cur_lower != 'non-exempt':
+                        df_download.at[idx, c_flsa] = "Non-Exempt"
+                        log_change(idx, "FLSA Classification", old_f, "Non-Exempt", "Forced Non-Exempt for Driver/Hourly-only Position.")
+                if c_pt and c_pt in df_download.columns:
+                    for idx in df_download[mask_jt_driver].index:
+                        old_p = df_download.at[idx, c_pt]
+                        cur_lower = str(old_p).strip().lower() if pd.notna(old_p) else ""
+                        if cur_lower != 'hourly':
+                            df_download.at[idx, c_pt] = "Hourly"
+                            log_change(idx, "Pay Type", old_p, "Hourly", "Forced Hourly for Driver/Hourly-only Position.")
+
+            # Rules 2-4: For non-Driver rows with blank FLSA, fill via Pay Type
+            # or surface "cannot determine" on the change log.
+            if c_pt and c_pt in df_download.columns:
+                mask_blank = _is_blank_series(c_flsa)
+                for idx in df_download[mask_blank & ~mask_jt_driver].index:
+                    pt_val = str(df_download.at[idx, c_pt]).lower().strip()
+                    pt_raw = str(df_download.at[idx, c_pt]).strip() if pd.notna(df_download.at[idx, c_pt]) else ""
+                    old_f = df_download.at[idx, c_flsa]
+                    if 'hour' in pt_val:
+                        df_download.at[idx, c_flsa] = "Non-Exempt"
+                        log_change(idx, "FLSA Classification", old_f, "Non-Exempt", "Filled blank FLSA based on Hourly Pay Type.")
+                    elif 'salar' in pt_val:
+                        df_download.at[idx, c_flsa] = "Exempt"
+                        log_change(idx, "FLSA Classification", old_f, "Exempt", "Filled blank FLSA based on Salaried Pay Type.")
+                    else:
+                        log_change(idx, "FLSA Classification", old_f, "(Blank — Not Filled)",
+                                   f"Cannot derive FLSA — source FLSA is blank, Job Title is not in Driver/Hourly-only list, and Pay Type is '{pt_raw or '(Blank)'}'. Manual review required.")
 
     # 6. Smart Driver chain — whole-word match against the hourly-only roster
     # (Driver, Walker, Helper, DDU Dedicated, etc.), not raw "driver" substring.
