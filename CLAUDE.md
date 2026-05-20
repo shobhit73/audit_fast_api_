@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `audit_fast_api/` is a separate Python project from the parent `Deduction Tool/` Streamlit app — it has its own `.git`, its own `requirements.txt`, and its own `core/` reimplementations of the audit logic. The parent's [CLAUDE.md](../CLAUDE.md) and [README.md](../README.md) describe the Streamlit tool; this document covers only the FastAPI + MCP service.
 
+**Three-repo topology (read the parent CLAUDE.md "Repository topology" section before pushing anything):** the parent working directory holds THREE independent git repos as nested folders — root `shobhit73/Unified_Audit_Tool`, `implementors_repo/` → `shobhitsharma-rgb/unified_audit_for_implementors` (a full byte-identical mirror of the Streamlit app, its own deployment), and this `audit_fast_api/` → `shobhit73/audit_fast_api_`. They are NOT submodules. A change that belongs in more than one repo must be committed and pushed to each remote separately — pushing only the root silently leaves the other deployments on stale code.
+
 When fixing a bug that exists in both, check the Streamlit `apps/{adp,paycom}/*.py` modules — most of the audit semantics here were ported from there and may need the same fix in both trees (see commit `f254a50` for an example: the ADP Census Sanity auto-fix pipeline was mirrored from the Streamlit `census_generator.py` into [core/census/sanity_check.py](core/census/sanity_check.py)).
 
 ## Run
@@ -193,7 +195,12 @@ Toggle keys (mirror the Streamlit checkbox keys): `fix_flsa`, `fix_emails`, `fix
 
 Note one intentional divergence from the Streamlit code: the Job-Title-from-Department fix honors **both** `fix_job_title` and `fix_position` keys because the Streamlit dict uses `fix_position` while the toggle UI uses `fix_job_title` — see comment in `generate_corrected_census_xlsx`.
 
-The sanity validator (`run_census_sanity_check` / `validate_source_data`) is intentionally lightweight — it only flags hard errors (missing Employee ID, SSN, Employment Status). Per-row warnings are produced separately by `_validate_for_warnings()` and injected into a `CRITICAL_WARNINGS` column on the corrected output. Don't merge the two — sanity reporting must stay read-only, fixes are opt-in.
+The sanity validator (`run_census_sanity_check` / `validate_source_data`) is intentionally lightweight — it only flags hard errors (missing Employee ID, SSN, Employment Status). Per-row warnings are produced separately by `_validate_for_warnings()` and injected into a `CRITICAL_WARNINGS` column on the corrected output. 
+
+**Recent Critical Logic Updates:**
+1.  **Leave/Inactive Handling**: `fix_leave_to_active` logic now converts "On Leave" or "Inactive" employees to "Active" if the termination date is missing, adding the comment *"Please make it exclude from payroll in Uzio"*. If a termination date is present, they are converted to "Terminated".
+2.  **Forced Driver FLSA**: Any job title containing "Driver" or "Helper" is forced to **Non-Exempt** and **Hourly**, overriding source data.
+3.  **Standardization**: Standardized "Full-Time" to "Full Time" and auto-fixes "Fian..." relationships to "Fiancee".
 
 ## CORS and deployment
 
