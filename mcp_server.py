@@ -239,8 +239,9 @@ def apply_data_corrections(file_path, corrections_list):
     corrections_list: list of dicts like {'id': '123', 'column': 'Status', 'value': 'Inactive'}
     """
     import openpyxl
+    from datetime import datetime
     from utils.audit_utils import norm_id, norm_colname
-    
+
     file_path = file_path.strip().strip('"')
     if not os.path.isfile(file_path):
         return {"error": f"File '{file_path}' not found."}
