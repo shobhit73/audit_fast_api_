@@ -21,6 +21,16 @@ import pandas as pd
 from utils.audit_utils import norm_colname, norm_blank, norm_ssn_canonical, is_hourly_only_job_title
 
 
+# Census columns that MUST be present for the sanity check to run. If any is
+# absent from an upload, generate_corrected_census_xlsx hard-stops.
+REQUIRED_CENSUS_FIELDS = [
+    'Employee ID', 'First Name', 'Last Name', 'SSN', 'DOB',
+    'Employment Status', 'Employment Type', 'Hire Date',
+    'Pay Type', 'FLSA Classification', 'Annual Salary', 'Working Hours',
+    'Job Title', 'Address Line 1', 'City', 'Zip', 'State',
+]
+
+
 # ---------------------------------------------------------------------------
 # Legacy lightweight validator (kept so existing endpoints / paycom path keep
 # working with their original JSON shape).
@@ -97,6 +107,29 @@ def _read_source(content, filename="upload.xlsx"):
     else:
         df = pd.read_excel(bio, dtype=str)
     return df
+
+
+def _detect_duplicate_columns(content, filename="upload.xlsx"):
+    """Peek at the raw header row; return column names that appear more than
+    once. Returns [] if none, or on any read failure."""
+    try:
+        bio = io.BytesIO(content)
+        if str(filename).lower().endswith(".csv"):
+            df_h = pd.read_csv(bio, header=None, nrows=1, dtype=str)
+        else:
+            df_h = pd.read_excel(bio, header=None, nrows=1, dtype=str)
+        if df_h.empty:
+            return []
+        headers = [str(h).strip() for h in df_h.iloc[0].tolist()
+                   if pd.notna(h) and str(h).strip() != ""]
+        seen, dupes = set(), []
+        for h in headers:
+            if h in seen and h not in dupes:
+                dupes.append(h)
+            seen.add(h)
+        return dupes
+    except Exception:
+        return []
 
 
 def _format_datetime_column(series):
@@ -230,12 +263,36 @@ def generate_corrected_census_xlsx(content, field_map_dict, fix_options=None,
 
     df_source = _read_source(content, filename)
 
+    # --- HARD STOP: duplicate column headers ---
+    _dupes = _detect_duplicate_columns(content, filename)
+    if _dupes:
+        raise ValueError(
+            "Duplicate column headers found: " + ", ".join(_dupes)
+            + ". A census file must have every column name only once — "
+            "remove the duplicate column(s) and re-upload."
+        )
+
     # Preserve original headers; normalize working copy.
     original_columns = list(df_source.columns)
     df_source.columns = [norm_colname(c) for c in df_source.columns]
     norm_to_orig = dict(zip(df_source.columns, original_columns))
 
     resolved_field_map = _resolve_field_map(df_source.columns, field_map_dict)
+
+    # --- HARD STOP: required columns missing ---
+    _missing = []
+    for _std in REQUIRED_CENSUS_FIELDS:
+        _col = resolved_field_map.get(_std)
+        if not _col or _col not in df_source.columns:
+            _vc = field_map_dict.get(_std)
+            _expected = (_vc[0] if isinstance(_vc, (list, tuple)) and _vc else _vc) or _std
+            _missing.append(f"{_expected} ({_std})")
+    if _missing:
+        raise ValueError(
+            "Required columns missing: " + "; ".join(_missing)
+            + ". Add the missing column(s) and re-upload — the census sanity "
+            "check cannot run without them."
+        )
 
     issue_map_by_idx = _validate_for_warnings(df_source, resolved_field_map)
     df_download = df_source.copy()
