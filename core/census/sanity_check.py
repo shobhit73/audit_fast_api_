@@ -146,9 +146,10 @@ def _format_datetime_column(series):
     return series.apply(_clean)
 
 
-def _build_excel_bytes(df_main, df_audit,
-                       sheet_main="Corrected Census", sheet_audit="Change Log"):
-    """Two-sheet workbook: corrected census + change log (mirrors generate_excel_with_audit)."""
+def _build_excel_bytes(df_main, df_audit, df_issues=None,
+                       sheet_main="Corrected Census", sheet_audit="Change Log",
+                       sheet_issues="Issues"):
+    """Three-sheet workbook: corrected census + change log + issues report."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         df_main.to_excel(writer, index=False, sheet_name=sheet_main)
@@ -163,6 +164,10 @@ def _build_excel_bytes(df_main, df_audit,
         else:
             cols = ["Employee ID", "Employee Name", "Field Changed", "Old Value", "Assumed Value", "Comments"]
             pd.DataFrame(columns=cols).to_excel(writer, index=False, sheet_name=sheet_audit)
+        if df_issues is None or df_issues.empty:
+            df_issues = pd.DataFrame([{"Note": "No issues found — nothing needs your attention."}])
+        df_issues.to_excel(writer, index=False, sheet_name=sheet_issues)
+        writer.sheets[sheet_issues].set_column(0, 8, 30)
     return output.getvalue()
 
 
@@ -241,6 +246,54 @@ def _validate_for_warnings(df_source, resolved_field_map):
         if problems:
             issues_by_row[idx] = "; ".join(problems)
     return issues_by_row
+
+
+_ISSUE_PLAIN = {
+    "SSN (blank)": "Missing Social Security Number",
+    "Employment Status (blank)": "Missing employment status",
+    "Terminated but missing Termination Date": "Marked as Terminated but has no termination date",
+    "Employment Type (blank)": "Missing employment type",
+    "Pay Type (blank)": "Missing pay type",
+    "Job Title (blank)": "Missing job title",
+    "Work Location (blank)": "Missing work location",
+    "Termination date predates Hire date": "Termination date is earlier than the hire date",
+    "Please make them excluded from payroll on Uzio": "Employee is On Leave / Inactive",
+}
+
+
+def _build_issues_df(df_source, resolved_field_map, issue_map_by_idx):
+    """Turn the per-row warnings into an Issues report — problems the
+    implementor still needs to act on."""
+    emp_id_col = resolved_field_map.get('Employee ID')
+    name_col = next((c for c in df_source.columns if 'name' in str(c).lower()), None)
+    rows = []
+    for idx, msg in issue_map_by_idx.items():
+        eid = ""
+        if emp_id_col and emp_id_col in df_source.columns:
+            v = df_source.at[idx, emp_id_col]
+            eid = str(v).strip() if pd.notna(v) else ""
+        name = ""
+        if name_col and name_col in df_source.columns:
+            v = df_source.at[idx, name_col]
+            name = str(v).strip() if pd.notna(v) else ""
+        for part in str(msg).split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            review = part.startswith("Please make them excluded")
+            plain = _ISSUE_PLAIN.get(part)
+            if plain is None:
+                plain = "Unrecognized employment status" if part.startswith("Non-standard Status") else part
+            rows.append({
+                'Employee ID': eid,
+                'Employee Name': name,
+                'Category': 'Please review' if review else 'Needs your attention',
+                'Issue': plain,
+                'What to do': ("The tool set status to Active — mark this employee as "
+                               "excluded from payroll in Uzio." if review
+                               else "Correct this in the source file, then re-upload."),
+            })
+    return pd.DataFrame(rows, columns=['Employee ID', 'Employee Name', 'Category', 'Issue', 'What to do'])
 
 
 def generate_corrected_census_xlsx(content, field_map_dict, fix_options=None,
@@ -592,7 +645,8 @@ def generate_corrected_census_xlsx(content, field_map_dict, fix_options=None,
     df_download = df_download[final_col_order].rename(columns=renaming_dict)
 
     df_audit = pd.DataFrame(audit_trail)
-    return _build_excel_bytes(df_download, df_audit), {
+    df_issues = _build_issues_df(df_source, resolved_field_map, issue_map_by_idx)
+    return _build_excel_bytes(df_download, df_audit, df_issues), {
         "rows_total": int(len(df_download)),
         "rows_with_warnings": int(sum(1 for v in df_download.get('CRITICAL_WARNINGS', pd.Series([])).astype(str) if v.strip())),
         "changes_logged": int(len(audit_trail)),

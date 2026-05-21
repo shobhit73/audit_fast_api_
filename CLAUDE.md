@@ -195,7 +195,9 @@ Toggle keys (mirror the Streamlit checkbox keys): `fix_flsa`, `fix_emails`, `fix
 
 Note one intentional divergence from the Streamlit code: the Job-Title-from-Department fix honors **both** `fix_job_title` and `fix_position` keys because the Streamlit dict uses `fix_position` while the toggle UI uses `fix_job_title` — see comment in `generate_corrected_census_xlsx`.
 
-The sanity validator (`run_census_sanity_check` / `validate_source_data`) is intentionally lightweight — it only flags hard errors (missing Employee ID, SSN, Employment Status). Per-row warnings are produced separately by `_validate_for_warnings()` and injected into a `CRITICAL_WARNINGS` column on the corrected output. 
+The sanity validator (`run_census_sanity_check` / `validate_source_data`) is intentionally lightweight — it only flags hard errors (missing Employee ID, SSN, Employment Status). Per-row warnings are produced separately by `_validate_for_warnings()` and injected into a `CRITICAL_WARNINGS` column on the corrected output.
+
+`generate_corrected_census_xlsx` also hard-stops up front on duplicate column headers (`_detect_duplicate_columns`) and on any missing `REQUIRED_CENSUS_FIELDS` column, raising a `ValueError`. The output workbook now has **three** sheets — `Corrected Census`, `Change Log`, and `Issues` (`_build_issues_df` reshapes the per-row warnings into one row per problem — Employee ID, Name, Category, plain-English Issue, What to do — mirroring the Streamlit Issues tab).
 
 **Recent Critical Logic Updates:**
 1.  **Leave/Inactive Handling**: `fix_leave_to_active` logic now converts "On Leave" or "Inactive" employees to "Active" if the termination date is missing, adding the comment *"Please make it exclude from payroll in Uzio"*. If a termination date is present, they are converted to "Terminated".
