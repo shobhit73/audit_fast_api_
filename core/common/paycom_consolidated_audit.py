@@ -523,13 +523,14 @@ def get_active_missing_in_uzio(df_uzio, df_paycom):
     paycom_ssn_col = next((c for c in df_paycom.columns if "SS_Number" in c or "SSN" in c), "SS_Number")
     
     uz_to_pc_map = get_identity_match_map(
-        df_uzio, df_paycom, 
-        uzio_id_col=u_id_col, 
+        df_uzio, df_paycom,
+        uzio_id_col=u_id_col,
         vendor_id_col=p_id_col,
         uzio_ssn_col=uzio_ssn_col,
         vendor_ssn_col=paycom_ssn_col
     )
-    pc_ids_in_uzio = set(uz_to_pc_map.values())
+    uzio_id_set = set(df_uzio[u_id_col].map(norm_id)) if u_id_col in df_uzio.columns else set()
+    pc_ids_in_uzio = set(uz_to_pc_map.values()) | uzio_id_set
 
     for idx, row in df_paycom.iterrows():
         eid = norm_id(row.get(p_id_col))
@@ -555,13 +556,14 @@ def get_terminated_missing_in_uzio(df_uzio, df_paycom):
     paycom_ssn_col = next((c for c in df_paycom.columns if "SS_Number" in c or "SSN" in c), "SS_Number")
     
     uz_to_pc_map = get_identity_match_map(
-        df_uzio, df_paycom, 
-        uzio_id_col=u_id_col, 
+        df_uzio, df_paycom,
+        uzio_id_col=u_id_col,
         vendor_id_col=p_id_col,
         uzio_ssn_col=uzio_ssn_col,
         vendor_ssn_col=paycom_ssn_col
     )
-    pc_ids_in_uzio = set(uz_to_pc_map.values())
+    uzio_id_set = set(df_uzio[u_id_col].map(norm_id)) if u_id_col in df_uzio.columns else set()
+    pc_ids_in_uzio = set(uz_to_pc_map.values()) | uzio_id_set
 
     for idx, row in df_paycom.iterrows():
         eid = norm_id(row.get(p_id_col))
