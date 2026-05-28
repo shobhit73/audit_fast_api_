@@ -803,11 +803,25 @@ def run_emergency_audit(df_uzio, df_paycom, uz_to_pc_id_map=None):
     u_id_col = "Job|Employee ID"
     p_id_col = next((c for c in df_paycom.columns if "Employee_Code" in c), "Employee_Code")
     
-    # 1. Map Columns
-    p_name_col = next((c for c in df_paycom.columns if "Emergency_1_Contact" in c), None)
-    p_rel_col = next((c for c in df_paycom.columns if "Emergency_1_Relationship" in c), None)
-    p_phone_col = next((c for c in df_paycom.columns if "Emergency_1_Phone" in c), None)
-    p_lang_col = next((c for c in df_paycom.columns if "Emergency_1_Language" in c), None)
+    # 1. Map Columns — discover every Emergency_N_* slot present in the Paycom
+    # export (Advanced Report Writer dumps up to N emergency contacts per
+    # employee as Emergency_1_*, Emergency_2_*, ...). Earlier versions only
+    # read Emergency_1_*, silently dropping additional contacts.
+    import re as _re
+    p_slot_indices = sorted({
+        int(m.group(1))
+        for c in df_paycom.columns
+        for m in [_re.match(r"Emergency_(\d+)_Contact$", str(c))]
+        if m
+    })
+    p_slot_cols = []
+    for n in p_slot_indices:
+        p_slot_cols.append({
+            "Name":  next((c for c in df_paycom.columns if c == f"Emergency_{n}_Contact"), None),
+            "Rel":   next((c for c in df_paycom.columns if c == f"Emergency_{n}_Relationship"), None),
+            "Phone": next((c for c in df_paycom.columns if c == f"Emergency_{n}_Phone"), None),
+            "Lang":  next((c for c in df_paycom.columns if c == f"Emergency_{n}_Language"), None),
+        })
 
     # 2. Process Uzio
     u_data = {}
@@ -839,18 +853,27 @@ def run_emergency_audit(df_uzio, df_paycom, uz_to_pc_id_map=None):
         # Translate Paycom ID to Uzio ID if mapping exists
         mapped_eid = pc_to_uz_id_map.get(eid, eid)
         
-        if p_name_col:
-            c_name = norm_str(row.get(p_name_col))
-            if c_name:
-                contact = {
-                    "Name": c_name,
-                    "Relation": norm_relation(row.get(p_rel_col)) if p_rel_col else "",
-                    "Phone": norm_phone(row.get(p_phone_col)) if p_phone_col else "",
-                    "RawPhone": norm_str(row.get(p_phone_col)) if p_phone_col else "",
-                    "Language": norm_str(row.get(p_lang_col)) if p_lang_col else ""
-                }
-                if mapped_eid not in p_data: p_data[mapped_eid] = []
-                p_data[mapped_eid].append(contact)
+        # Iterate every Emergency_N_* slot the file actually has, not just
+        # Emergency_1_*. Each non-empty contact (Name OR Phone) is captured.
+        for slot in p_slot_cols:
+            name_col = slot["Name"]
+            if not name_col:
+                continue
+            c_name = norm_str(row.get(name_col))
+            c_phone_raw = row.get(slot["Phone"]) if slot["Phone"] else ""
+            c_phone = norm_phone(c_phone_raw) if slot["Phone"] else ""
+            if not c_name and not c_phone:
+                continue
+            contact = {
+                "Name": c_name,
+                "Relation": norm_relation(row.get(slot["Rel"])) if slot["Rel"] else "",
+                "Phone": c_phone,
+                "RawPhone": norm_str(c_phone_raw) if slot["Phone"] else "",
+                "Language": norm_str(row.get(slot["Lang"])) if slot["Lang"] else "",
+            }
+            if mapped_eid not in p_data:
+                p_data[mapped_eid] = []
+            p_data[mapped_eid].append(contact)
 
     def compare_emergency(field, u_val, p_val):
         u_s = str(u_val).strip().lower()
