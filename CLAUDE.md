@@ -187,6 +187,17 @@ If you find yourself wanting to import something from `utils/audit_utils.py` tha
 - `read_uzio_raw_file()` reads sheet `'Employee Details'` with `header=3` — Uzio raw exports always have a 3-row preamble before the column headers.
 - `find_header_and_data()` scans the first 50 rows for `"employee id" / "employee name" / "associate id"` to locate the real header row. ADP exports often have a banner row above the data.
 
+### CSV output rule — NEVER WRITE A UTF-8 BOM. **NON-NEGOTIABLE.**
+
+Same rule as the root repo. Every CSV this service produces (FastAPI response bodies, MCP-tool outputs, files written to the audit inbox) MUST be plain UTF-8 with NO byte-order mark. The downstream customer API matches the first column header *literally* (`Associate ID`, `Employee_Code`, ...), so a BOM smuggles `U+FEFF` in front of the first header and the column lookup silently misses. Customer-impacting incident already shipped (Skyland, May 2026).
+
+- ❌ `df.to_csv(...).encode("utf-8-sig")` / `df.to_csv(path, encoding="utf-8-sig")`
+- ✅ `df.to_csv(...).encode("utf-8")` / `df.to_csv(path, encoding="utf-8")` / `df.to_csv(...)` (pandas default is fine)
+
+The "Excel needs the BOM" rationale is not valid: every tool that emits a CSV also emits an XLSX from the same DataFrame — route Excel users to the XLSX. The CSV is for API ingestion only.
+
+Before merging any change that calls `to_csv` or writes a `.csv`, grep the diff for `utf-8-sig` / `utf_8_sig`. They must not appear in encoding arguments (comments referencing this rule are fine).
+
 ## Census Sanity auto-fix pipeline
 
 [core/census/sanity_check.py](core/census/sanity_check.py) ports the Streamlit `render_auto_fix_options` toggles into a single function: `generate_corrected_census_xlsx(content, field_map_dict, fix_options=...)` returns `(xlsx_bytes, summary)`. The function is exposed both via FastAPI (`/audit/adp/census-sanity`) and MCP (`adp_census_sanity` tool).
