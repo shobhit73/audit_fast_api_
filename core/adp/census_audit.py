@@ -29,7 +29,10 @@ ADP_FIELD_MAP = {
     'Hourly Pay Rate': 'Regular Pay Rate Amount',
     'Working Hours': 'Standard Hours',
     'Job Title': 'Job Title Description',
-    'Department': 'Department Description',
+    # NOTE: 'Department' intentionally not mapped for ADP. ADP source census does
+    # NOT export a 'Department Description' column. 'Home Department Code' is a
+    # completely unrelated identifier, not the department name. Do NOT re-add a
+    # 'Department' entry pointing to 'Home Department Code'.
     'Work Email': 'Work Contact: Work Email',
     'Personal Email': 'Personal Contact: Personal Email',
     'SSN': 'Tax ID (SSN)',
