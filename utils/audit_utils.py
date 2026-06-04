@@ -66,7 +66,7 @@ UZIO_RAW_MAPPING = {
 HOURLY_ONLY_JOB_TITLES = {
     "driver", "lead driver", "walker", "helper", "driver-lite", "driver-step van",
     "driver-unscheduled", "ddu dedicated", "ddu shared", "delivery associate",
-    "delivery associates", "driver -major appliance"
+    "delivery associates", "driver -major appliance", "e-biker", "tso-pv driver"
 }
 
 # Whole-word, case-insensitive regex over the title set above.
