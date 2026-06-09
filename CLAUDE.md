@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Setting this up on a new machine?** See [SETUP.md](SETUP.md) — the step-by-step SOP for installing dependencies and registering the server in Claude Desktop.
+> **Setting this up on a new machine?** See [SETUP.md](SETUP.md) — the step-by-step SOP for installing dependencies and registering the server in Claude Desktop. To package it as a one-click `.mcpb` extension for non-technical users, see [BUNDLE.md](BUNDLE.md).
 
 ## Scope of this directory
 

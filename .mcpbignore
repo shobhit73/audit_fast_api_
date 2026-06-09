@@ -1,0 +1,23 @@
+# Files excluded from the packed .mcpb bundle (keeps it small and clean).
+.git/
+.gitignore
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Dev / one-off / scratch — not part of the shipped tool
+scratch/
+Testing/
+audit_summary.json
+_run_paycom_census.py
+peek_dates.py
+test_mcp_mappings.py
+investigate_carvan_*.py
+generate_carvan_*.py
+
+# The vendored deps are rebuilt per-OS at pack time (see BUNDLE.md);
+# don't ship a stale lib/ from another machine unless you intend to.
+# (Comment the next line out if you are packing WITH a prebuilt lib/.)
+# lib/
