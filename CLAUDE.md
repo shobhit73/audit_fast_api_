@@ -78,12 +78,14 @@ Each tool accepts both a local path *and* a base64 fallback — see `load_file()
 
 ## core/ — audit implementations
 
-**Many modules in `core/` are stubs.** Don't trust the directory listing — check the file. Known stubs that just return `{"message": "...", "results": []}`:
+**Every audit wired into the MCP server has a real implementation.** Earlier versions shipped placeholder stubs for the "misc" audits; those are now real and are what the live tools call:
 
-- [core/adp/misc_audits.py](core/adp/misc_audits.py) — emergency, license, timeoff
-- [core/misc_audits.py](core/misc_audits.py) — emergency (both vendors), license, timeoff, paycom payment
+- [core/adp/misc_audits.py](core/adp/misc_audits.py) — `run_adp_emergency_audit`, `run_adp_license_audit`, `run_adp_timeoff_audit` (real comparison / balance-update logic).
+- [core/paycom/misc_audits.py](core/paycom/misc_audits.py) — `run_paycom_emergency_audit`, `run_paycom_timeoff_audit` (real).
 
-Real implementations live in: [core/adp/census_audit.py](core/adp/census_audit.py), [core/adp/deduction_audit.py](core/adp/deduction_audit.py), [core/adp/payment_audit.py](core/adp/payment_audit.py), [core/adp/withholding_audit.py](core/adp/withholding_audit.py), [core/adp/total_comparison.py](core/adp/total_comparison.py), [core/adp/prior_payroll_sanity.py](core/adp/prior_payroll_sanity.py), [core/adp/prior_payroll_setup_helper.py](core/adp/prior_payroll_setup_helper.py), [core/adp/selective_census_sync.py](core/adp/selective_census_sync.py), [core/paycom/census_audit.py](core/paycom/census_audit.py), [core/paycom/total_comparison.py](core/paycom/total_comparison.py), [core/paycom/withholding_audit.py](core/paycom/withholding_audit.py), [core/paycom/prior_payroll_setup_helper.py](core/paycom/prior_payroll_setup_helper.py), [core/paycom/selective_census_sync.py](core/paycom/selective_census_sync.py), [core/common/paycom_consolidated_audit.py](core/common/paycom_consolidated_audit.py), [core/common/adp_combined_audit.py](core/common/adp_combined_audit.py), and [core/census/sanity_check.py](core/census/sanity_check.py).
+> **Dead file:** [core/misc_audits.py](core/misc_audits.py) still exists but is imported by **nothing**. It held the old placeholder stubs that the now-deleted `main.py` pulled in via import-shadowing. The MCP server uses the per-vendor `core/{adp,paycom}/misc_audits.py` modules above instead. Safe to delete.
+
+Real implementations live in: [core/adp/census_audit.py](core/adp/census_audit.py), [core/adp/deduction_audit.py](core/adp/deduction_audit.py), [core/adp/payment_audit.py](core/adp/payment_audit.py), [core/adp/withholding_audit.py](core/adp/withholding_audit.py), [core/adp/total_comparison.py](core/adp/total_comparison.py), [core/adp/prior_payroll_sanity.py](core/adp/prior_payroll_sanity.py), [core/adp/prior_payroll_setup_helper.py](core/adp/prior_payroll_setup_helper.py), [core/adp/selective_census_sync.py](core/adp/selective_census_sync.py), [core/paycom/census_audit.py](core/paycom/census_audit.py), [core/paycom/total_comparison.py](core/paycom/total_comparison.py), [core/paycom/withholding_audit.py](core/paycom/withholding_audit.py), [core/paycom/prior_payroll_setup_helper.py](core/paycom/prior_payroll_setup_helper.py), [core/paycom/selective_census_sync.py](core/paycom/selective_census_sync.py), [core/common/paycom_consolidated_audit.py](core/common/paycom_consolidated_audit.py), [core/common/adp_combined_audit.py](core/common/adp_combined_audit.py), [core/adp/misc_audits.py](core/adp/misc_audits.py), [core/paycom/misc_audits.py](core/paycom/misc_audits.py), and [core/census/sanity_check.py](core/census/sanity_check.py).
 
 ### Prior Payroll Sanity (`core/adp/prior_payroll_sanity.py`)
 
