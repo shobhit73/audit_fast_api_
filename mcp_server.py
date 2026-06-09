@@ -45,10 +45,12 @@ from core.adp.prior_payroll_setup_helper import run_adp_prior_payroll_setup_help
 from core.paycom.prior_payroll_setup_helper import run_paycom_prior_payroll_setup_helper
 from utils.file_shape_guards import require_vendor
 
-# Stdio MCP uses stdout as the protocol channel. Redirect stdout to stderr so any
-# stray print() from an imported module can't corrupt the JSON-RPC stream. Must
-# stay before any tool runs. NEVER remove this.
-sys.stdout = sys.stderr
+# NOTE on protecting the stdio protocol channel: do NOT redirect sys.stdout to
+# sys.stderr here at import time. mcp.server.stdio.stdio_server() wraps
+# sys.stdout.buffer when it is entered, so redirecting beforehand sends the
+# JSON-RPC protocol itself to stderr and the client never sees responses (it
+# times out with "Could not attach"). The redirect is done INSIDE run_stdio()
+# AFTER stdio_server() has captured the real stdout — see the bottom of this file.
 
 server = Server("audit-tool-server")
 
@@ -2036,6 +2038,12 @@ from mcp.server.stdio import stdio_server
 
 async def run_stdio():
     async with stdio_server() as (read_stream, write_stream):
+        # stdio_server() has now wrapped the REAL stdout for the JSON-RPC protocol.
+        # Only NOW is it safe to point Python-level stdout at stderr, so any stray
+        # print() during tool execution can't corrupt the protocol stream. (Doing
+        # this at import time instead sends the protocol itself to stderr and breaks
+        # the transport — the client times out with "Could not attach".)
+        sys.stdout = sys.stderr
         await server.run(
             read_stream, write_stream,
             InitializationOptions(
