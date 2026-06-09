@@ -1,6 +1,6 @@
 # Claude Desktop - Multi-Agent Payroll Migration SOP (v1.6)
 Before starting any audit or analysis, you **must** verify the data location.
-1.  **Data Access**: You can access files from any local path (e.g., `Downloads`, client folders). Using the `copy_to_audit_inbox` tool is optional but recommended to keep inputs and outputs in `C:\Users\shobhit.sharma\Desktop\Audit Files`.
+1.  **Data Access**: You can access files from any local path (e.g., `Downloads`, client folders). Using the `copy_to_audit_inbox` tool is optional but recommended to keep inputs and outputs in the **Audit Files inbox** (the running user's `Desktop\Audit Files` folder by default, or wherever the `AUDIT_INBOX` env var points). Always discover the actual location with `list_audit_files` rather than assuming an absolute path.
 2.  **Large Files (>1MB)**: Use the **Side-Car DB Strategy (DuckDB)**. Never attempt to read a file >1MB fully into context.
     *   Call `get_file_schema` to identify columns.
     *   Call `query_data_sql` to extract specific employees or calculate totals using SQL.
@@ -35,7 +35,7 @@ Every audit tool's name encodes its scope. Pick the wrong tool and the runtime g
 ## 2. Ingestion & Extraction Agent
 **NOTE**: You can read from any local folder provided by the user. Use the `path` field from `list_audit_files` to ensure accuracy.
 1.  **Copy**: Move master census/payroll files from the client's source folder (e.g., `Downloads/Happy Delivery`) to the local Desktop inbox using the **`copy_to_audit_inbox`** tool.
-2.  **Verify**: Use `list_audit_files` to confirm files are ready in `C:\Users\shobhit.sharma\Desktop\Audit Files`.
+2.  **Verify**: Use `list_audit_files` to confirm files are ready in the Audit Files inbox.
 3.  **Isolate**: Call `selective_employee_extractor` to pull only the problematic employees into a temporary "Working Set" CSV/Excel.
 
 ## 4. Correction & Sanity Agent
@@ -145,7 +145,7 @@ If the user mentions a specific client (e.g., "Happy Delivery"):
 2.  **Tool**: `adp_prior_payroll_setup_helper` (also available as a Streamlit tool under "ADP - Prior Payroll Setup Helper" in the parent Unified Audit Tool, with identical analysis but a UI for interactive review).
 3.  **Inputs**:
     *   `file_path` (preferred) or `file_base64` — sanitized ADP prior payroll file (.xlsx / .csv).
-    *   `state_tax_master_path` — defaults to `C:\Users\shobhit.sharma\Downloads\State Tax Code.csv`. Override only if the master is elsewhere.
+    *   `state_tax_master_path` — path to the State Tax Code master CSV. If omitted, falls back to the `STATE_TAX_MASTER_PATH` env var; otherwise pass `state_tax_master_base64`.
     *   `state_tax_master_base64` — fallback for remote callers.
 4.  **Output** (Excel workbook in `Audit Files` + standalone Tax_Mapping CSV):
     *   `Earnings_Codes` — every REGULAR/OVERTIME and `ADDITIONAL EARNINGS : XXX` code with $ total, employee count, hours, avg rate.

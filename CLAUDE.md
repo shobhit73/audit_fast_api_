@@ -1,10 +1,14 @@
-# CLAUDE.md (v1.6)
+# CLAUDE.md (v2.0)
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Setting this up on a new machine?** See [SETUP.md](SETUP.md) — the step-by-step SOP for installing dependencies and registering the server in Claude Desktop.
+
 ## Scope of this directory
 
-`audit_fast_api/` is a separate Python project from the parent `Deduction Tool/` Streamlit app — it has its own `.git`, its own `requirements.txt`, and its own `core/` reimplementations of the audit logic. The parent's [CLAUDE.md](../CLAUDE.md) and [README.md](../README.md) describe the Streamlit tool; this document covers only the FastAPI + MCP service.
+`audit_fast_api/` is a separate Python project from the parent `Deduction Tool/` Streamlit app — it has its own `.git`, its own `requirements.txt`, and its own `core/` reimplementations of the audit logic. The parent's [CLAUDE.md](../CLAUDE.md) and [README.md](../README.md) describe the Streamlit tool; this document covers only the **local MCP service**.
+
+> **Architecture note (v2.0):** the FastAPI HTTP layer and the Vercel/SSE deployment were removed. This is now a **local, stdio-only MCP server** meant to run on the user's machine and connect to the Claude Desktop app. There is no web server, no network surface, and no `main.py`. The historical name `audit_fast_api` is kept only because that's the git remote.
 
 **Three-repo topology (read the parent CLAUDE.md "Repository topology" section before pushing anything):** the parent working directory holds THREE independent git repos as nested folders — root `shobhit73/Unified_Audit_Tool`, `implementors_repo/` → `shobhitsharma-rgb/unified_audit_for_implementors` (a full byte-identical mirror of the Streamlit app, its own deployment), and this `audit_fast_api/` → `shobhit73/audit_fast_api_`. They are NOT submodules. A change that belongs in more than one repo must be committed and pushed to each remote separately — pushing only the root silently leaves the other deployments on stale code.
 
@@ -15,45 +19,45 @@ When fixing a bug that exists in both, check the Streamlit `apps/{adp,paycom}/*.
 ```bash
 pip install -r requirements.txt
 
-# FastAPI HTTP server (mounts MCP at /mcp/sse)
-uvicorn main:app --reload --port 8000
-
-# MCP server over stdio (for Claude Desktop / local clients)
+# Local MCP server over stdio. Claude Desktop launches this for you once it is
+# registered in claude_desktop_config.json (see SETUP.md) — you rarely run it by
+# hand, but this is the exact command Claude Desktop invokes:
 python mcp_server.py
 ```
 
+A bare `python mcp_server.py` will start and then sit silently waiting for a
+client to speak the MCP protocol on stdin — that "hang" is correct, not a crash.
 There are no tests, no linter, no build step.
 
-## Two entry points, one shared core
+## One entry point: [mcp_server.py](mcp_server.py) — local MCP server (stdio)
 
-### [main.py](main.py) — FastAPI
+`mcp_server.py` is the whole service. It registers every audit as an MCP tool
+(`@server.list_tools()`), dispatches calls (`@server.call_tool()`), and runs over
+the **stdio** transport (`run_stdio()` under `if __name__ == "__main__"`) — the
+transport Claude Desktop speaks to a local MCP server. There is no HTTP/SSE
+transport and no FastAPI app any more.
 
-`app = FastAPI(...)` is defined at module top level (this is what Vercel's Zero Config deploy detects — see commit `21192a1`).
-
-Almost the entire body of `main.py` is wrapped in a single `try: ... except: ...`. If any import or endpoint definition fails at startup, the `except` block installs a fallback `/` and `/{path:path}` that return the captured `startup_error`. Don't refactor this away — when deployed to Vercel it's the only way to see why the app failed to boot.
-
-The MCP Starlette app is mounted into FastAPI at `/mcp`:
-```python
-from mcp_server import mcp_app
-app.mount("/mcp", mcp_app)
-```
-So the SSE endpoint is reachable at `/mcp/sse` and clients post messages to `/mcp/messages`.
-
-### [mcp_server.py](mcp_server.py) — MCP Server
-
-Exposes the same audits as MCP tools. Two transports in one file:
-- **stdio** (`if __name__ == "__main__"`) — for Claude Desktop
-- **SSE** (`mcp_app = Starlette(...)`) — mounted by `main.py`
-
-Critical at the top of the file: `sys.stdout = sys.stderr`. Never remove this. Stdio MCP uses stdout as the protocol channel, so any `print()` from imported modules would corrupt the stream.
+Critical near the top of the file: `sys.stdout = sys.stderr`. **Never remove this.**
+Stdio MCP uses stdout as the JSON-RPC protocol channel, so any stray `print()` from
+an imported module would corrupt the stream and break every tool. Route diagnostics
+to stderr (or `logging`), never `print` to stdout.
 
 #### The audit-inbox drop-folder pattern
 
 ```python
-AUDIT_INBOX = r"C:\Users\shobhit.sharma\Desktop\Audit Files"
+AUDIT_INBOX = os.environ.get("AUDIT_INBOX") or os.path.join(
+    os.path.expanduser("~"), "Desktop", "Audit Files"
+)
 ```
 
-**MANDATORY**: 100% of tool output files are consolidated in this folder. Claude Desktop must always check this folder via `list_audit_files` to find generated reports.
+The inbox is **portable**: it defaults to the *running user's* `Desktop/Audit Files`
+folder and can be overridden with the `AUDIT_INBOX` environment variable (set it in
+the `"env"` block of `claude_desktop_config.json`). Do NOT hardcode an absolute
+user path here again — that was the old behavior and it broke on every machine that
+wasn't the original author's.
+
+**MANDATORY**: 100% of tool output files are consolidated in this folder. Claude
+Desktop must always check it via `list_audit_files` to find generated reports.
 
 #### Data Correction & Formatting
 The `apply_data_corrections` tool uses `openpyxl` to perform row-level updates based on **Employee ID**. This tool is specifically designed to **preserve all original Excel formatting** (colors, fonts, borders). Always prioritize this for "Implementer Overrides" over standard Pandas-based re-writes.
@@ -98,7 +102,7 @@ Critical: ADP money cells are stored as `=ROUND(x, 2.0)` Excel formulas. `pandas
 
 `aggregation_strategy="full_quarter"` collapses everything to one row per associate; `"preserve_pay_periods"` keeps distinct pay periods and only merges same-day duplicate row pairs. Output is CSV with the input's exact column headers and column order — the API expects ADP-shape, no renames.
 
-Exposed both via FastAPI (`/audit/adp/prior-payroll-sanity`) and MCP (`adp_prior_payroll_sanity` tool).
+Exposed as the MCP tool `adp_prior_payroll_sanity`.
 
 ### Prior Payroll Setup Helper (`core/adp/prior_payroll_setup_helper.py`)
 
@@ -116,7 +120,7 @@ Key sheets and the algorithms behind them:
 
 State Tax Code master path defaults to `C:\Users\shobhit.sharma\Downloads\State Tax Code.csv`; can be overridden via `state_tax_master_path` or `state_tax_master_base64`.
 
-Exposed via FastAPI (`/audit/adp/prior-payroll-setup-helper`) and MCP (`adp_prior_payroll_setup_helper` tool). Output also writes the Tax_Mapping CSV to the audit inbox alongside the Excel workbook so it can be uploaded directly to the next migration step.
+Exposed as the MCP tool `adp_prior_payroll_setup_helper`. Output also writes the Tax_Mapping CSV to the audit inbox alongside the Excel workbook so it can be uploaded directly to the next migration step.
 
 ### Prior Payroll Setup Helper -- Paycom (`core/paycom/prior_payroll_setup_helper.py`)
 
@@ -134,7 +138,7 @@ Exposed via FastAPI (`/audit/adp/prior-payroll-setup-helper`) and MCP (`adp_prio
 
 The deleted `core/paycom/deduction_analyzer.py` was a 54-line stub that returned a "Simplified logic for demonstration" message; the real logic lived in the Streamlit version (934 lines, very complex). The new tool replaces both with a tight ~350-line core module.
 
-Exposed via FastAPI (`/audit/paycom/prior-payroll-setup-helper`), MCP (`paycom_prior_payroll_setup_helper`), and Streamlit (`apps/paycom/prior_payroll_setup_helper.py`, sidebar entry "Paycom - Prior Payroll Setup Helper").
+Exposed as the MCP tool `paycom_prior_payroll_setup_helper` (and in the Streamlit app as `apps/paycom/prior_payroll_setup_helper.py`, sidebar entry "Paycom - Prior Payroll Setup Helper").
 
 ### Selective Census Sync (`core/{adp,paycom}/selective_census_sync.py`)
 
@@ -163,13 +167,9 @@ The `selective_employee_extractor` tool in `mcp_server.py` allows for targeted a
 - `list_audit_files`: Scans the `AUDIT_INBOX` or any specified directory to discover files.
 - `read_audit_report`: Reads full Excel/CSV reports back into Claude. This is essential for analyzing the results of a previous audit without manually copying data.
 
-### Misc-audit import-shadowing in main.py
-
-`main.py` imports the misc audits **twice** — first from `core.adp.misc_audits` near the top, then later does `from core.misc_audits import run_adp_emergency_audit, run_paycom_emergency_audit, ...` which **overrides** the earlier names with the stub versions. So today the `/audit/adp/emergency`, `/audit/adp/license`, `/audit/adp/timeoff`, `/audit/paycom/emergency`, `/audit/paycom/timeoff`, and `/audit/paycom/payment` endpoints all return placeholder results. If you're asked to "fix" one of these audits, the work is to write the real logic in `core/misc_audits.py` (or port it from the Streamlit `apps/{adp,paycom}/*_audit.py` siblings).
-
 ### Field maps live next to the audit
 
-`ADP_FIELD_MAP` is in [core/adp/census_audit.py](core/adp/census_audit.py:9), `PAYCOM_FIELD_MAP` is in [core/paycom/census_audit.py](core/paycom/census_audit.py:8). Other modules import these by name — keep them as module-level dicts, don't move them into a config file without updating the `mcp_server.py` and `main.py` imports.
+`ADP_FIELD_MAP` is in [core/adp/census_audit.py](core/adp/census_audit.py:9), `PAYCOM_FIELD_MAP` is in [core/paycom/census_audit.py](core/paycom/census_audit.py:8). Other modules import these by name — keep them as module-level dicts, don't move them into a config file without updating the `mcp_server.py` imports.
 
 ## utils/audit_utils.py — shared engine
 
@@ -190,7 +190,7 @@ If you find yourself wanting to import something from `utils/audit_utils.py` tha
 
 ### CSV output rule — NEVER WRITE A UTF-8 BOM. **NON-NEGOTIABLE.**
 
-Same rule as the root repo. Every CSV this service produces (FastAPI response bodies, MCP-tool outputs, files written to the audit inbox) MUST be plain UTF-8 with NO byte-order mark. The downstream customer API matches the first column header *literally* (`Associate ID`, `Employee_Code`, ...), so a BOM smuggles `U+FEFF` in front of the first header and the column lookup silently misses. Customer-impacting incident already shipped (Skyland, May 2026).
+Same rule as the root repo. Every CSV this service produces (MCP-tool outputs, files written to the audit inbox) MUST be plain UTF-8 with NO byte-order mark. The downstream customer API matches the first column header *literally* (`Associate ID`, `Employee_Code`, ...), so a BOM smuggles `U+FEFF` in front of the first header and the column lookup silently misses. Customer-impacting incident already shipped (Skyland, May 2026).
 
 - ❌ `df.to_csv(...).encode("utf-8-sig")` / `df.to_csv(path, encoding="utf-8-sig")`
 - ✅ `df.to_csv(...).encode("utf-8")` / `df.to_csv(path, encoding="utf-8")` / `df.to_csv(...)` (pandas default is fine)
@@ -201,7 +201,7 @@ Before merging any change that calls `to_csv` or writes a `.csv`, grep the diff 
 
 ## Census Sanity auto-fix pipeline
 
-[core/census/sanity_check.py](core/census/sanity_check.py) ports the Streamlit `render_auto_fix_options` toggles into a single function: `generate_corrected_census_xlsx(content, field_map_dict, fix_options=...)` returns `(xlsx_bytes, summary)`. The function is exposed both via FastAPI (`/audit/adp/census-sanity`) and MCP (`adp_census_sanity` tool).
+[core/census/sanity_check.py](core/census/sanity_check.py) ports the Streamlit `render_auto_fix_options` toggles into a single function: `generate_corrected_census_xlsx(content, field_map_dict, fix_options=...)` returns `(xlsx_bytes, summary)`. The function is exposed as the MCP tool `adp_census_sanity`.
 
 Toggle keys (mirror the Streamlit checkbox keys): `fix_flsa`, `fix_emails`, `fix_job_title`, `fix_driver_smart`, `fix_license`, `fix_status`, `fix_inactive` (alias of `fix_status`), `fix_type`, `fix_dol_status`, `fix_leave_to_active`, `fix_blank_jt_to_driver`, `fix_std_hours`, `rename_std_hours`, `fix_zip`, `rename_zip_col`, `replace_gender_col`, plus `sort_by_manager`. All default `False`.
 
@@ -214,6 +214,10 @@ The sanity validator (`run_census_sanity_check` / `validate_source_data`) is int
 2.  **Forced Driver FLSA**: Any job title containing "Driver" or "Helper" is forced to **Non-Exempt** and **Hourly**, overriding source data.
 3.  **Standardization**: Standardized "Full-Time" to "Full Time" and auto-fixes "Fian..." relationships to "Fiancee".
 
-## CORS and deployment
+## Deployment
 
-`main.py` enables fully-open CORS (`allow_origins=["*"]`). This is intentional for the Vercel + Claude Desktop setup. If deploying anywhere internet-facing, lock this down before exposing any endpoint that mutates state.
+There is no deployment. This is a **local stdio MCP server** — Claude Desktop spawns
+`python mcp_server.py` as a child process and talks to it over stdin/stdout. No web
+server, no ports, no CORS, no network surface. Everything runs on the user's machine
+against local files in the audit inbox. To put it on another machine, follow
+[SETUP.md](SETUP.md); there is nothing to host.

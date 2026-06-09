@@ -5,12 +5,15 @@ import numpy as np
 import duckdb
 from mcp.server.models import InitializationOptions
 from mcp.server import NotificationOptions, Server
-from mcp.server.sse import SseServerTransport
 import mcp.types as types
 import sys
 
 # ── Drop-folder: user puts files here, Claude picks them up automatically ──
-AUDIT_INBOX = r"C:\Users\shobhit.sharma\Desktop\Audit Files"
+# Portable default: the running user's Desktop\Audit Files. Override with the
+# AUDIT_INBOX environment variable (e.g. in claude_desktop_config.json -> "env").
+AUDIT_INBOX = os.environ.get("AUDIT_INBOX") or os.path.join(
+    os.path.expanduser("~"), "Desktop", "Audit Files"
+)
 
 # --- Core Imports ---
 from core.adp.total_comparison import run_adp_total_comparison
@@ -42,8 +45,10 @@ from core.adp.prior_payroll_setup_helper import run_adp_prior_payroll_setup_help
 from core.paycom.prior_payroll_setup_helper import run_paycom_prior_payroll_setup_helper
 from utils.file_shape_guards import require_vendor
 
-from starlette.applications import Starlette
-from starlette.routing import Mount, Route
+# Stdio MCP uses stdout as the protocol channel. Redirect stdout to stderr so any
+# stray print() from an imported module can't corrupt the JSON-RPC stream. Must
+# stay before any tool runs. NEVER remove this.
+sys.stdout = sys.stderr
 
 server = Server("audit-tool-server")
 
@@ -362,8 +367,8 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="list_audit_files",
             description=(
-                "[VENDOR-AGNOSTIC] [INPUT: optional directory path; defaults to "
-                "C:/Users/shobhit.sharma/Desktop/Audit Files]\n"
+                "[VENDOR-AGNOSTIC] [INPUT: optional directory path; defaults to the "
+                "audit inbox -- your Desktop/Audit Files folder, or the AUDIT_INBOX env var]\n"
                 "Lists all files in the audit drop-folder (or any user-specified directory) "
                 "with full paths, sizes, and last-modified timestamps. ALWAYS call this first "
                 "before running any audit to discover which files the user has available - "
@@ -778,9 +783,10 @@ async def handle_list_tools() -> list[types.Tool]:
                     "state_tax_master_path": {
                         "type": "string",
                         "description": (
-                            "Local path to the State Tax Code master CSV "
-                            "(default: C:/Users/shobhit.sharma/Downloads/State Tax Code.csv). "
-                            "Required to populate Uzio Tax Code / Unique Tax ID columns."
+                            "Local path to the State Tax Code master CSV. Required to "
+                            "populate Uzio Tax Code / Unique Tax ID columns. If omitted, "
+                            "falls back to the STATE_TAX_MASTER_PATH env var, else pass "
+                            "state_tax_master_base64."
                         ),
                     },
                     "state_tax_master_base64": {
@@ -1618,7 +1624,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 os.path.basename(file_path_arg) if file_path_arg else "adp_prior_payroll.xlsx"
             )
             require_vendor(content, filename, "adp", "adp_prior_payroll_setup_helper")
-            master_path = arguments.get("state_tax_master_path") or r"C:\Users\shobhit.sharma\Downloads\State Tax Code.csv"
+            master_path = arguments.get("state_tax_master_path") or os.environ.get("STATE_TAX_MASTER_PATH", "")
             master_b64 = arguments.get("state_tax_master_base64")
             master_content = b""
             if master_path and os.path.isfile(master_path.strip().strip('"')):
@@ -2023,28 +2029,6 @@ async def handle_call_tool(name: str, arguments: dict | None):
         import traceback
         return [types.TextContent(type="text", text=f"Error in '{name}': {e}\n\n{traceback.format_exc()}")]
 
-
-# ── SSE transport (for Vercel / HTTP) ────────────────────────────────────────
-sse = SseServerTransport("/messages")
-
-async def handle_sse(request):
-    async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-        await server.run(
-            streams[0], streams[1],
-            InitializationOptions(
-                server_name="audit-tool-server",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
-                ),
-            ),
-        )
-
-mcp_app = Starlette(routes=[
-    Route("/sse", endpoint=handle_sse),
-    Mount("/messages", app=sse.handle_post_message),
-])
 
 # ── Stdio transport (for local Claude Desktop) ────────────────────────────────
 import asyncio
