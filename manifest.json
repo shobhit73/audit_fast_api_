@@ -1,0 +1,53 @@
+{
+  "manifest_version": "0.3",
+  "name": "audit-tools",
+  "display_name": "Payroll Audit Tools",
+  "version": "2.0.0",
+  "description": "Local MCP server exposing ADP/Paycom/Uzio payroll audit, census, withholding, prior-payroll, and consolidated-audit tools to Claude Desktop. Reads and writes files in a local Audit Files folder.",
+  "long_description": "A local, stdio-only MCP server. Drop ADP/Paycom/Uzio exports into your Audit Files folder and ask Claude to run an audit; reports are written back to the same folder as timestamped .xlsx (and .csv for single-sheet outputs). No web server, no network surface — everything runs on your machine. See SETUP.md and CLAUDE.md for details.",
+  "author": {
+    "name": "Shobhit Sharma",
+    "email": "shobhit.sharma@uzio.com"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "mcp_server.py",
+    "mcp_config": {
+      "command": "python",
+      "args": ["${__dirname}/mcp_server.py"],
+      "env": {
+        "PYTHONPATH": "${__dirname}/lib",
+        "AUDIT_INBOX": "${user_config.audit_inbox}",
+        "STATE_TAX_MASTER_PATH": "${user_config.state_tax_master}"
+      },
+      "platform_overrides": {
+        "darwin": { "command": "python3" },
+        "linux": { "command": "python3" }
+      }
+    }
+  },
+  "tools_generated": true,
+  "user_config": {
+    "audit_inbox": {
+      "type": "directory",
+      "title": "Audit Files folder",
+      "description": "Folder where you drop input exports and where reports are written. Defaults to your Desktop/Audit Files.",
+      "required": false,
+      "default": "${HOME}/Desktop/Audit Files"
+    },
+    "state_tax_master": {
+      "type": "file",
+      "title": "State Tax Code master CSV (optional)",
+      "description": "Only needed for the 'adp_prior_payroll_setup_helper' tool. Leave blank if you don't use that tool; you can also pass the path to the tool directly.",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  },
+  "keywords": ["payroll", "audit", "adp", "paycom", "uzio", "census", "mcp", "claude-desktop"],
+  "license": "UNLICENSED"
+}
