@@ -37,10 +37,14 @@ the **stdio** transport (`run_stdio()` under `if __name__ == "__main__"`) — th
 transport Claude Desktop speaks to a local MCP server. There is no HTTP/SSE
 transport and no FastAPI app any more.
 
-Critical near the top of the file: `sys.stdout = sys.stderr`. **Never remove this.**
-Stdio MCP uses stdout as the JSON-RPC protocol channel, so any stray `print()` from
-an imported module would corrupt the stream and break every tool. Route diagnostics
-to stderr (or `logging`), never `print` to stdout.
+**Protecting the stdout protocol channel — placement matters.** Stdio MCP uses
+stdout as the JSON-RPC channel, so a stray `print()` to stdout would corrupt it.
+The guard is `sys.stdout = sys.stderr`, but it **must run INSIDE `run_stdio()`,
+after `stdio_server()` has been entered** — `stdio_server()` wraps `sys.stdout.buffer`
+at entry, so redirecting *before* that (e.g. at module import) sends the protocol
+itself to stderr and the client times out with "Could not attach to MCP server".
+Never move this redirect to the top of the file. Route diagnostics to stderr or
+`logging`, never `print` to stdout.
 
 #### The audit-inbox drop-folder pattern
 
