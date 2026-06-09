@@ -109,18 +109,6 @@ If the user mentions a specific client (e.g., "Happy Delivery"):
 4.  **Output**: Cleaned CSV in the `Audit Files` folder + summary dict (rows dropped, associates aggregated, merge events). When `mode == "detection_only"`, no file is written and `output_file` is absent.
 5.  **CRITICAL**: ADP money cells are `=ROUND(x, 2.0)` Excel formulas — this tool reads them with `openpyxl` and evaluates the formula. Never use `pandas.read_excel` directly on these files; you'll get null money columns.
 
-### 8.2 Prior Payroll Generator (ADP / Paycom)
-**Trigger**: User wants to fill a blank Uzio Prior Payroll Template (.xlsm) from up to 10 ADP/Paycom source files.
-1.  **Tools**: `adp_prior_payroll_generator`, `paycom_prior_payroll_generator`
-2.  **Inputs**:
-    *   `uzio_template_path` (preferred) or `uzio_template_b64` — blank Uzio template (.xlsm with VBA, preserved).
-    *   `source_files` — list of `{file_path | file_b64, filename}` (max 10).
-    *   `override_mapping` (optional):
-        *   ADP: `{adp_column_name: uzio_col_idx}` — negative idx force-skips.
-        *   Paycom: `{"type_code|type_description": uzio_col_idx}` — `|` separator since JSON keys can't be tuples.
-3.  **Auto-mapping**: Fuzzy-string heuristic with domain boosts for Medicare / SS / FIT / 401k / FUTA / SUI / SDI / regular / overtime / bonus / state-income. Net Pay auto-routes to whichever Uzio header contains `"net pay"`.
-4.  **Validation**: Flags any employee-period where `Gross − Taxes − Deductions ≠ Net Pay` (capped at 200 rows in response).
-
 ### 8.3 Selective Census Sync (ADP / Paycom)
 **Trigger**: User has a pre-filled Uzio Census Template (.xlsm) and only wants to update specific columns from a fresh ADP/Paycom export — leaving every other column / sheet / VBA macro untouched.
 1.  **Tools**: `adp_selective_census_sync`, `paycom_selective_census_sync`

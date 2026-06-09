@@ -33,7 +33,6 @@ try:
     from core.paycom.total_comparison import run_paycom_total_comparison
     from core.paycom.census_audit import run_paycom_census_audit
     from core.paycom.withholding_audit import run_paycom_withholding_audit
-    from core.paycom.sql_master import run_paycom_sql_master
 
     from utils.audit_utils import norm_colname
 
@@ -286,11 +285,6 @@ try:
         try:
             mapping_content = await mapping_file.read() if mapping_file else None
             return run_paycom_withholding_audit(await uzio_raw.read(), await paycom_raw.read(), mapping_content)
-        except Exception as e: raise HTTPException(status_code=500, detail=str(e))
-
-    @app.post("/audit/paycom/sql-master")
-    async def paycom_sql_master(sql_file: UploadFile = File(...)):
-        try: return run_paycom_sql_master(await sql_file.read())
         except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 except Exception as e:

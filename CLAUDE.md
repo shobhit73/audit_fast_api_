@@ -64,7 +64,11 @@ Each tool accepts both a local path *and* a base64 fallback — see `load_file()
 
 #### Output convention
 
-`save_results_to_excel()` writes results to `~/Desktop/<Prefix>_<timestamp>.xlsx` and returns a JSON summary with a top-10 preview. The MCP response is the summary — the full report is the file on disk. Keep this contract: streaming megabytes of audit results back through MCP will exceed token limits.
+`save_results_to_excel()` writes results to `<audit_inbox>/<Prefix>_<timestamp>.xlsx` and returns a JSON summary with a top-10 preview. The MCP response is the summary — the full report is the file on disk. Keep this contract: streaming megabytes of audit results back through MCP will exceed token limits.
+
+**Single-sheet tools also get a parallel CSV.** When the helper is called with a list-of-dicts (one logical sheet), it writes both `<Prefix>_<timestamp>.xlsx` AND `<Prefix>_<timestamp>.csv` to the audit inbox, and the returned summary includes a `csv_file_path` key. The CSV is **plain UTF-8 with NO byte-order mark** — see the "CSV output rule" section further down for the non-negotiable detail.
+
+**Multi-sheet tools (dict-of-lists input) are XLSX-only.** Per product decision, exploding an 11-sheet workbook into 11 sibling CSVs creates more audit-inbox noise than it's worth, and downstream APIs that need machine-ingestable data should consume one of the per-sheet outputs upstream of the workbook. If you find yourself needing a CSV from a specific tab of a multi-sheet audit, refactor that tab's logic into its own single-sheet tool, don't expand `save_results_to_excel` to dump per-sheet CSVs.
 
 `_json_default()` handles numpy/pandas/datetime serialization. Use it (`json.dumps(..., default=_json_default)`) anywhere you're returning audit results, since pandas leaks `np.int64`/`Timestamp` into dicts in non-obvious places.
 
@@ -75,7 +79,7 @@ Each tool accepts both a local path *and* a base64 fallback — see `load_file()
 - [core/adp/misc_audits.py](core/adp/misc_audits.py) — emergency, license, timeoff
 - [core/misc_audits.py](core/misc_audits.py) — emergency (both vendors), license, timeoff, paycom payment
 
-Real implementations live in: [core/adp/census_audit.py](core/adp/census_audit.py), [core/adp/deduction_audit.py](core/adp/deduction_audit.py), [core/adp/payment_audit.py](core/adp/payment_audit.py), [core/adp/withholding_audit.py](core/adp/withholding_audit.py), [core/adp/total_comparison.py](core/adp/total_comparison.py), [core/adp/prior_payroll_sanity.py](core/adp/prior_payroll_sanity.py), [core/adp/prior_payroll_generator.py](core/adp/prior_payroll_generator.py), [core/adp/prior_payroll_setup_helper.py](core/adp/prior_payroll_setup_helper.py), [core/adp/selective_census_sync.py](core/adp/selective_census_sync.py), [core/paycom/census_audit.py](core/paycom/census_audit.py), [core/paycom/total_comparison.py](core/paycom/total_comparison.py), [core/paycom/withholding_audit.py](core/paycom/withholding_audit.py), [core/paycom/sql_master.py](core/paycom/sql_master.py), [core/paycom/prior_payroll_generator.py](core/paycom/prior_payroll_generator.py), [core/paycom/prior_payroll_setup_helper.py](core/paycom/prior_payroll_setup_helper.py), [core/paycom/selective_census_sync.py](core/paycom/selective_census_sync.py), [core/common/paycom_consolidated_audit.py](core/common/paycom_consolidated_audit.py), and [core/census/sanity_check.py](core/census/sanity_check.py).
+Real implementations live in: [core/adp/census_audit.py](core/adp/census_audit.py), [core/adp/deduction_audit.py](core/adp/deduction_audit.py), [core/adp/payment_audit.py](core/adp/payment_audit.py), [core/adp/withholding_audit.py](core/adp/withholding_audit.py), [core/adp/total_comparison.py](core/adp/total_comparison.py), [core/adp/prior_payroll_sanity.py](core/adp/prior_payroll_sanity.py), [core/adp/prior_payroll_setup_helper.py](core/adp/prior_payroll_setup_helper.py), [core/adp/selective_census_sync.py](core/adp/selective_census_sync.py), [core/paycom/census_audit.py](core/paycom/census_audit.py), [core/paycom/total_comparison.py](core/paycom/total_comparison.py), [core/paycom/withholding_audit.py](core/paycom/withholding_audit.py), [core/paycom/prior_payroll_setup_helper.py](core/paycom/prior_payroll_setup_helper.py), [core/paycom/selective_census_sync.py](core/paycom/selective_census_sync.py), [core/common/paycom_consolidated_audit.py](core/common/paycom_consolidated_audit.py), and [core/census/sanity_check.py](core/census/sanity_check.py).
 
 ### Prior Payroll Sanity (`core/adp/prior_payroll_sanity.py`)
 
@@ -131,15 +135,6 @@ Exposed via FastAPI (`/audit/adp/prior-payroll-setup-helper`) and MCP (`adp_prio
 The deleted `core/paycom/deduction_analyzer.py` was a 54-line stub that returned a "Simplified logic for demonstration" message; the real logic lived in the Streamlit version (934 lines, very complex). The new tool replaces both with a tight ~350-line core module.
 
 Exposed via FastAPI (`/audit/paycom/prior-payroll-setup-helper`), MCP (`paycom_prior_payroll_setup_helper`), and Streamlit (`apps/paycom/prior_payroll_setup_helper.py`, sidebar entry "Paycom - Prior Payroll Setup Helper").
-
-### Prior Payroll Generator (`core/{adp,paycom}/prior_payroll_generator.py`)
-
-Ports of the Streamlit `apps/{adp,paycom}/prior_payroll_generator.py` tools. Both fill a blank Uzio Prior Payroll Template (.xlsm) from up to 10 source files. Auto-mapping uses a fuzzy-string heuristic (`auto_guess_mapping`) with domain boosts for Medicare / Social Security / FIT / 401k / FUTA / SUI / SDI / regular / overtime / bonus / state-income. Each tool accepts an `override_mapping` parameter:
-
-- ADP keys are simple `{adp_column_name: uzio_col_idx}`.
-- Paycom keys are `{"type_code|type_description": uzio_col_idx}` (string with a `|` separator) since JSON object keys can't be tuples.
-
-Negative `uzio_col_idx` force-skips that column. Net Pay is auto-routed to whichever Uzio column header contains `"net pay"`. Validation flags any employee-period where `Gross − Taxes − Deductions ≠ Net Pay` (returned in the response, capped at 200 rows).
 
 ### Selective Census Sync (`core/{adp,paycom}/selective_census_sync.py`)
 

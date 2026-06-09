@@ -24,7 +24,6 @@ from core.paycom.deduction_audit import run_paycom_deduction_audit
 from core.paycom.total_comparison import run_paycom_total_comparison
 from core.paycom.census_audit import run_paycom_census_audit, PAYCOM_FIELD_MAP
 from core.paycom.withholding_audit import run_paycom_withholding_audit
-from core.paycom.sql_master import run_paycom_sql_master
 from core.paycom.payment_audit import run_paycom_payment_audit
 from core.paycom.misc_audits import run_paycom_emergency_audit, run_paycom_timeoff_audit
 
@@ -35,8 +34,6 @@ from core.adp.misc_audits import (
 from core.adp.census_generator import run_adp_census_generation
 from core.paycom.census_generator import run_paycom_census_generation
 from core.adp.prior_payroll_sanity import run_adp_prior_payroll_sanity
-from core.adp.prior_payroll_generator import run_adp_prior_payroll_generator
-from core.paycom.prior_payroll_generator import run_paycom_prior_payroll_generator
 from core.adp.selective_census_sync import run_adp_selective_census_sync, discover_mappings as adp_selective_discover
 from core.paycom.selective_census_sync import run_paycom_selective_census_sync, discover_mappings as paycom_selective_discover
 from core.common.paycom_consolidated_audit import run_paycom_consolidated_audit
@@ -121,19 +118,36 @@ def save_results_to_excel(results, name_prefix):
     if isinstance(results, list):
         df = pd.DataFrame(results)
         df.to_excel(out_path, index=False)
+
+        # ALSO write a parallel CSV alongside the XLSX so downstream APIs that
+        # need machine-ingestable input can consume the same data. UTF-8 with
+        # NO BOM — see CLAUDE.md "CSV output rule" (Skyland incident, 2026).
+        # Multi-sheet results (dict branch below) intentionally skip CSV.
+        csv_filename = f"{name_prefix}_{stamp}.csv"
+        csv_path = os.path.join(AUDIT_INBOX, csv_filename)
+        df.to_csv(csv_path, index=False, encoding="utf-8")
+
         summary = {
             "total_rows": len(results),
             "file_path": out_path,
-            "message": f"Full report saved to 'Audit Files' folder as {filename}.",
+            "csv_file_path": csv_path,
+            "message": (
+                f"Full report saved to 'Audit Files' folder as {filename} "
+                f"(XLSX) and {csv_filename} (CSV)."
+            ),
             "data": results if len(results) < 2000 else results[:500],
             "note": "Full data returned in response." if len(results) < 2000 else "Data truncated due to size."
         }
         if "Status" in df.columns:
             summary["counts_by_status"] = df["Status"].value_counts().to_dict()
         return summary
-        
+
     elif isinstance(results, dict):
-        # Handle dict of lists (multiple sheets)
+        # Handle dict of lists (multiple sheets). CSV intentionally skipped —
+        # multi-sheet outputs are XLSX-only by product decision (the per-sheet
+        # CSV pile creates more audit-inbox noise than it's worth, and the
+        # downstream APIs that need single-sheet data are upstream of this
+        # workbook anyway).
         with pd.ExcelWriter(out_path) as writer:
             summary_info = {"file_path": out_path, "message": f"Report saved to 'Audit Files' folder as {filename}."}
             for sheet_name, data in results.items():
@@ -278,12 +292,23 @@ def apply_data_corrections(file_path, corrections_list):
             return {"error": f"Could not identify Employee ID column. Found headers in row {header_row_idx}: {headers}"}
         id_col_idx = id_col_indices[0]
         
+        # Build an Employee-ID -> row index ONCE up front. Previously each
+        # correction triggered a fresh top-to-bottom scan of the sheet, so a
+        # 10k-correction run over a 10k-row file did ~100M cell reads. With the
+        # index, each correction is an O(1) dict lookup. First occurrence of an
+        # ID wins, matching the original "break on first match" behavior.
+        id_row_index = {}
+        for row_idx in range(header_row_idx + 1, ws.max_row + 1):
+            cell_val = norm_id(ws.cell(row=row_idx, column=id_col_idx + 1).value)
+            if cell_val and cell_val not in id_row_index:
+                id_row_index[cell_val] = row_idx
+
         results = []
         for corr in corrections_list:
             target_id = norm_id(corr.get('id'))
             target_col = norm_colname(corr.get('column')).lower()
             new_val = corr.get('value')
-            
+
             # Find target column - error on ambiguity rather than silently
             # picking the first match (e.g. "FLSA" matches both "FLSA Description"
             # and "FLSA Code").
@@ -300,18 +325,13 @@ def apply_data_corrections(file_path, corrections_list):
                 })
                 continue
             col_idx = matches[0][0]
-            
-            # 2. Find row and update
-            found = False
-            for row_idx in range(header_row_idx + 1, ws.max_row + 1):
-                cell_val = norm_id(ws.cell(row=row_idx, column=id_col_idx + 1).value)
-                if cell_val == target_id:
-                    ws.cell(row=row_idx, column=col_idx + 1).value = new_val
-                    results.append({"id": target_id, "column": corr.get('column'), "status": "Success"})
-                    found = True
-                    break
-            
-            if not found:
+
+            # 2. Find row via the prebuilt index and update
+            row_idx = id_row_index.get(target_id)
+            if row_idx is not None:
+                ws.cell(row=row_idx, column=col_idx + 1).value = new_val
+                results.append({"id": target_id, "column": corr.get('column'), "status": "Success"})
+            else:
                 results.append({"id": target_id, "status": "Error", "message": "Employee ID not found in file."})
         
         # 3. Save as new file with suffix
@@ -664,50 +684,6 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
-            name="adp_prior_payroll_generator",
-            description=(
-                "Generates a filled Uzio Prior Payroll Template (.xlsx) from 1-10 ADP "
-                "Prior Payroll History files. Each ADP dynamic column is auto-mapped to a "
-                "Uzio target column via a fuzzy-string heuristic (handles Medicare, Social "
-                "Security, FIT, 401k, FUTA, SUI/SDI, regular/overtime/bonus, state income, "
-                "etc.). The auto-mapping can be overridden per-column with override_mapping. "
-                "Records are aggregated per (employee, pay-period-start), Net Pay is routed "
-                "to the column whose Uzio header contains 'net pay', and a validation pass "
-                "flags any employee-period where Gross - Taxes - Deductions != Net Pay.\n\n"
-                "WORKFLOW: copy both the blank Uzio template and the ADP file(s) to the "
-                "Audit Files inbox first, then pass the resulting paths. The output xlsx is "
-                "written to the same inbox and its path returned in the response."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "uzio_template_path": {"type": "string", "description": PATH_DESC},
-                    "uzio_template_base64": {"type": "string", "description": "Fallback: base64-encoded Uzio Prior Payroll Template (headers only)."},
-                    "adp_file_paths": {
-                        "type": "array", "items": {"type": "string"},
-                        "description": "List of local paths to ADP Prior Payroll History .xlsx files (max 10).",
-                    },
-                    "adp_files_base64": {
-                        "type": "array", "items": {"type": "string"},
-                        "description": "Fallback: base64-encoded ADP files (max 10).",
-                    },
-                    "override_mapping": {
-                        "type": "object",
-                        "description": (
-                            "Optional {adp_column_name: uzio_column_index} override. Use a "
-                            "negative integer to force-skip a column. Auto-guessed pairs are "
-                            "kept for any ADP column not present in this object."
-                        ),
-                        "additionalProperties": {"type": "integer"},
-                    },
-                    "client_name": {
-                        "type": "string",
-                        "description": "Optional client name; used in the output filename.",
-                    },
-                },
-            },
-        ),
-        types.Tool(
             name="adp_prior_payroll_sanity",
             description=(
                 "[VENDOR: ADP only] [INPUT: ADP Prior Payroll Register Report (.xlsx/.csv)]\n"
@@ -966,50 +942,6 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
-            name="paycom_prior_payroll_generator",
-            description=(
-                "Generates a filled Uzio Prior Payroll Template (.xlsx) from 1-10 Paycom "
-                "Prior Payroll files (long format with Type Code / Type Description / Code "
-                "Description / Amount). Each (type_code, type_description) pair is auto-"
-                "mapped to a Uzio target column via a fuzzy-string heuristic. "
-                "'Net Pay Distribution' rows are auto-summed into the Uzio 'Net Pay' column; "
-                "'Employee Benefits' rows are skipped. Pay-period dates are pulled from the "
-                "filename pattern 'Pay Period MMDDYYYY MMDDYYYY Pay Date MMDDYYYY'.\n\n"
-                "Records are aggregated per (employee, pay-period); a validation pass flags "
-                "any employee-period where Gross - Taxes - Deductions != Net Pay. The auto-"
-                "mapping can be overridden per-pair with override_mapping (key format "
-                "'type_code|type_description', value is the Uzio column index, or a "
-                "negative integer to skip).\n\n"
-                "WORKFLOW: copy both the blank Uzio template and the Paycom file(s) to the "
-                "Audit Files inbox first, then pass the resulting paths."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "uzio_template_path": {"type": "string", "description": PATH_DESC},
-                    "uzio_template_base64": {"type": "string", "description": "Fallback: base64-encoded Uzio Prior Payroll Template (headers only)."},
-                    "paycom_file_paths": {
-                        "type": "array", "items": {"type": "string"},
-                        "description": "Local paths to Paycom Prior Payroll .xlsx files (max 10).",
-                    },
-                    "paycom_files_base64": {
-                        "type": "array", "items": {"type": "string"},
-                        "description": "Fallback: base64-encoded Paycom files (max 10).",
-                    },
-                    "override_mapping": {
-                        "type": "object",
-                        "description": (
-                            "Optional {'type_code|type_description': uzio_col_idx} override. "
-                            "Use a negative integer to force-skip a pair. Auto-guessed pairs "
-                            "are kept for any (tc, td) not present in this object."
-                        ),
-                        "additionalProperties": {"type": "integer"},
-                    },
-                    "client_name": {"type": "string", "description": "Optional client name; used in the output filename."},
-                },
-            },
-        ),
-        types.Tool(
             name="paycom_prior_payroll_setup_helper",
             description=(
                 "[VENDOR: Paycom only (TWO Paycom files required)] "
@@ -1132,22 +1064,6 @@ async def handle_list_tools() -> list[types.Tool]:
                     "paycom_file_path": {"type": "string", "description": PATH_DESC},
                     "uzio_raw_base64": {"type": "string", "description": "Fallback: base64 Uzio file"},
                     "paycom_raw_base64": {"type": "string", "description": "Fallback: base64 Paycom file"},
-                },
-            },
-        ),
-        types.Tool(
-            name="paycom_sql_master",
-            description=(
-                "[VENDOR: Paycom only] [INPUT: Paycom UPS SQL Master file (.sql/.csv/.xlsx)]\n"
-                "[DO NOT USE FOR: ADP files, UZIO files, or generic SQL exports - this is a "
-                "Paycom-specific consolidation report.]\n"
-                "Processes a Paycom UPS SQL Master file into a structured audit report."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string", "description": PATH_DESC},
-                    "sql_file_base64": {"type": "string"},
                 },
             },
         ),
@@ -1581,30 +1497,6 @@ async def handle_call_tool(name: str, arguments: dict | None):
             payload = {"output_file": out_path, "summary": summary}
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
-        elif name == "paycom_prior_payroll_generator":
-            uzio_bytes = load_file(arguments, "uzio_template_path", "uzio_template_base64")
-            paycom_files = load_files_list(arguments, "paycom_file_paths", "paycom_files_base64")
-            if not paycom_files:
-                return [types.TextContent(type="text", text="Error: provide paycom_file_paths or paycom_files_base64.")]
-            if len(paycom_files) > 10:
-                return [types.TextContent(type="text", text="Error: maximum 10 Paycom files supported.")]
-            override_mapping = arguments.get("override_mapping") or None
-            client_name = (arguments.get("client_name") or "").strip()
-            xlsx_bytes, summary = run_paycom_prior_payroll_generator(
-                uzio_bytes, paycom_files, override_mapping=override_mapping,
-            )
-            from datetime import datetime
-            stamp = datetime.now().strftime("%Y%m%d_%H%M")
-            base = (client_name + "_" if client_name else "")
-            out_name = f"Uzio_Prior_Payroll_Paycom_{base}{stamp}.xlsx".replace(" ", "_")
-            if not os.path.exists(AUDIT_INBOX):
-                os.makedirs(AUDIT_INBOX, exist_ok=True)
-            out_path = os.path.join(AUDIT_INBOX, out_name)
-            with open(out_path, "wb") as f:
-                f.write(xlsx_bytes)
-            payload = {"output_file": out_path, "summary": summary}
-            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
-
         elif name == "adp_selective_census_sync":
             adp_content = load_file(arguments, "adp_file_path", "adp_file_base64")
             uzio_content = load_file(arguments, "uzio_template_path", "uzio_template_base64")
@@ -1636,30 +1528,6 @@ async def handle_call_tool(name: str, arguments: dict | None):
             out_path = os.path.join(AUDIT_INBOX, out_name)
             with open(out_path, "wb") as f:
                 f.write(xlsm_bytes)
-            payload = {"output_file": out_path, "summary": summary}
-            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
-
-        elif name == "adp_prior_payroll_generator":
-            uzio_bytes = load_file(arguments, "uzio_template_path", "uzio_template_base64")
-            adp_files = load_files_list(arguments, "adp_file_paths", "adp_files_base64")
-            if not adp_files:
-                return [types.TextContent(type="text", text="Error: provide adp_file_paths or adp_files_base64.")]
-            if len(adp_files) > 10:
-                return [types.TextContent(type="text", text="Error: maximum 10 ADP files supported.")]
-            override_mapping = arguments.get("override_mapping") or None
-            client_name = (arguments.get("client_name") or "").strip()
-            xlsx_bytes, summary = run_adp_prior_payroll_generator(
-                uzio_bytes, adp_files, override_mapping=override_mapping,
-            )
-            from datetime import datetime
-            stamp = datetime.now().strftime("%Y%m%d_%H%M")
-            base = (client_name + "_" if client_name else "")
-            out_name = f"Uzio_Prior_Payroll_{base}{stamp}.xlsx".replace(" ", "_")
-            if not os.path.exists(AUDIT_INBOX):
-                os.makedirs(AUDIT_INBOX, exist_ok=True)
-            out_path = os.path.join(AUDIT_INBOX, out_name)
-            with open(out_path, "wb") as f:
-                f.write(xlsx_bytes)
             payload = {"output_file": out_path, "summary": summary}
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
@@ -1902,12 +1770,6 @@ async def handle_call_tool(name: str, arguments: dict | None):
             paycom = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
             results = run_paycom_census_audit(uzio, paycom)
             summary = save_results_to_excel(results, "Paycom_Census_Audit")
-            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
-
-        elif name == "paycom_sql_master":
-            content = load_file(arguments, "file_path", "sql_file_base64")
-            results = run_paycom_sql_master(content)
-            summary = save_results_to_excel(results, "Paycom_SQL_Master")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_payment_audit":
