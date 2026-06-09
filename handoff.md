@@ -17,11 +17,11 @@ This repository has been transformed from a basic API into a **Multi-Agent Auton
     *   **Robust Detection**: Automatically scans the first 20 rows to find headers (handling ADP's leading criteria rows) and uses case-insensitive matching for "Associate ID", "File #", etc.
 
 4.  **Consolidated Output Architecture**:
-    *   100% of tool output reports are now guaranteed to be saved in `C:\Users\shobhit.sharma\Desktop\Audit Files`.
+    *   100% of tool output reports are now guaranteed to be saved in the Audit Files inbox (the running user's `Desktop\Audit Files` by default, or the `AUDIT_INBOX` env var location).
     *   Claude is instructed to always use `list_audit_files` to discover these reports before performing deep-reads.
 
 ## 🛠 Technical Context
-*   **Repo**: `audit_fast_api` (FastAPI + MCP).
+*   **Repo**: `audit_fast_api` — a local, stdio-only MCP server for Claude Desktop (the FastAPI/Vercel layer was removed in v2.0; see [SETUP.md](SETUP.md)).
 *   **Stability**: MCP stdio channel is protected via `sys.stdout = sys.stderr` in `mcp_server.py`.
 *   **Version Control**: Current SOP and Technical Docs are at **v1.3**.
 
