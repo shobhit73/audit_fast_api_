@@ -37,6 +37,7 @@ from core.adp.prior_payroll_sanity import run_adp_prior_payroll_sanity
 from core.adp.selective_census_sync import run_adp_selective_census_sync, discover_mappings as adp_selective_discover
 from core.paycom.selective_census_sync import run_paycom_selective_census_sync, discover_mappings as paycom_selective_discover
 from core.common.paycom_consolidated_audit import run_paycom_consolidated_audit
+from core.common.adp_combined_audit import run_adp_consolidated_audit
 from core.adp.prior_payroll_setup_helper import run_adp_prior_payroll_setup_helper, build_simplified_xlsx_bytes as _setup_helper_xlsx
 from core.paycom.prior_payroll_setup_helper import run_paycom_prior_payroll_setup_helper
 from utils.file_shape_guards import require_vendor
@@ -1190,6 +1191,38 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="adp_consolidated_audit",
+            description=(
+                "[VENDOR: ADP + UZIO] Runs the ADP Census, Direct Deposit (Payment), "
+                "Emergency Contact, and License audits in one pass against the Uzio Master / "
+                "HR Report (CSV with category labels in row 1, headers in row 2) and up to "
+                "three ADP exports. The Uzio HR Report is reshaped into the file shape each "
+                "ADP audit expects, then each audit runs and its sheets are merged under a "
+                "section prefix: CEN_* (census detail + anomalies), DD_* (direct deposit), "
+                "EC_* (emergency contact), LIC_* (license).\n\n"
+                "The Uzio HR Report is REQUIRED. Each ADP file is OPTIONAL — an audit runs "
+                "only if its file is supplied, and the ADP Emergency + License Details Report "
+                "drives BOTH the Emergency Contact and License audits. Provide at least one "
+                "ADP file. A failure in one audit is captured in the _Errors sheet and does "
+                "not abort the others.\n\n"
+                "WORKFLOW: copy all files to the Audit Files inbox first, then pass the paths."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uzio_file_path": {"type": "string", "description": PATH_DESC + " (Uzio Master / HR Report CSV)"},
+                    "uzio_raw_base64": {"type": "string", "description": "Fallback: base64-encoded Uzio Master/HR Report CSV"},
+                    "adp_census_file_path": {"type": "string", "description": PATH_DESC + " (ADP Census Export xlsx/csv) -- drives the Census audit"},
+                    "adp_census_base64": {"type": "string", "description": "Fallback: base64-encoded ADP Census Export"},
+                    "adp_dd_file_path": {"type": "string", "description": PATH_DESC + " (ADP Direct Deposit Export xlsx/csv) -- drives the Direct Deposit audit"},
+                    "adp_dd_base64": {"type": "string", "description": "Fallback: base64-encoded ADP Direct Deposit Export"},
+                    "adp_em_file_path": {"type": "string", "description": PATH_DESC + " (ADP Emergency + License Details Report xlsx/csv) -- drives BOTH the Emergency Contact and License audits"},
+                    "adp_em_base64": {"type": "string", "description": "Fallback: base64-encoded ADP Emergency + License Details Report"},
+                    "client_name": {"type": "string", "description": "Optional client name; used in the output filename."},
+                },
+            },
+        ),
+        types.Tool(
             name="selective_employee_extractor",
             description=(
                 "[VENDOR-AGNOSTIC] [INPUT: any payroll/census file (ADP, Paycom, UZIO) with "
@@ -1460,6 +1493,19 @@ async def handle_call_tool(name: str, arguments: dict | None):
             client_name = (arguments.get("client_name") or "").strip()
             results = run_paycom_consolidated_audit(uzio_content, paycom_content, paycom_filename)
             prefix = f"Paycom_Consolidated_Audit_{client_name}".rstrip("_") if client_name else "Paycom_Consolidated_Audit"
+            summary = save_results_to_excel(results, prefix)
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
+
+        elif name == "adp_consolidated_audit":
+            uzio_content = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
+            adp_census_content = load_file(arguments, "adp_census_file_path", "adp_census_base64") or None
+            adp_dd_content = load_file(arguments, "adp_dd_file_path", "adp_dd_base64") or None
+            adp_em_content = load_file(arguments, "adp_em_file_path", "adp_em_base64") or None
+            if not (adp_census_content or adp_dd_content or adp_em_content):
+                return [types.TextContent(type="text", text="Error: provide at least one ADP file (adp_census_file_path, adp_dd_file_path, or adp_em_file_path).")]
+            client_name = (arguments.get("client_name") or "").strip()
+            results = run_adp_consolidated_audit(uzio_content, adp_census_content, adp_dd_content, adp_em_content)
+            prefix = f"ADP_Consolidated_Audit_{client_name}".rstrip("_") if client_name else "ADP_Consolidated_Audit"
             summary = save_results_to_excel(results, prefix)
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
