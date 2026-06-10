@@ -619,22 +619,38 @@ async def handle_list_tools() -> list[types.Tool]:
                 "Associate ID, Legal First Name, FLSA Description, etc.]\n"
                 "[DO NOT USE FOR: UZIO Master / UZIO Census Template / Paycom Census - the "
                 "runtime guard will refuse those. For Paycom census use 'paycom_census_sanity'.]\n\n"
-                "Applies ALL auto-corrections automatically to an ADP Census export "
-                "(FLSA alignment, Smart Driver, Status/Type mapping, Zip cleanup, Gender column, "
-                "Email fallback, Manager sorting, Date formatting, etc.). No toggle parameters needed — "
-                "all fixes are always enabled.\n\n"
-                "Two optional mappings give parity with the Streamlit sanity check screen "
-                "(both default to empty / not applied):\n"
-                "  - work_location_mapping: {source_location: uzio_location} dict. When provided, "
-                "    the source's Location Description column is remapped in the Corrected Source.\n"
-                "  - job_title_mapping: {dsp_title: amazon_title} dict. When provided, writes a "
-                "    side-car CSV (DSP Job Title | Amazon Job Title) into the audit inbox alongside "
-                "    the corrected XLSX. The cleaned census file is NOT mutated by this — same as "
-                "    the Streamlit behavior; the CSV is a separate artifact.\n\n"
-                "Set discover_only=true to skip writing and instead return the unique work "
-                "locations + distinct DSP job titles (with auto-Amazon match) + Amazon catalog "
-                "so the caller can build both mapping dicts. Re-call with discover_only omitted "
-                "and the two mapping params populated to apply.\n\n"
+                "**TWO-STEP FLOW — ALWAYS START WITH DISCOVERY.** The default behavior of this "
+                "tool (called with just file_path / file_base64) is to return a DISCOVERY payload — "
+                "it does NOT produce the cleaned census on the first call. The payload contains "
+                "the unique work locations, the distinct DSP job titles (auto-matched against the "
+                "Amazon catalog where possible), and the Amazon catalog itself.\n\n"
+                "**You MUST then ask the user explicitly for BOTH mappings — work locations AND "
+                "job titles.** Do NOT pick work_location_mapping or job_title_mapping values "
+                "yourself, even when an auto-match is available. Show the user the discovery "
+                "payload and wait for their explicit instructions for every entry. Once they "
+                "confirm, re-call this tool with work_location_mapping and job_title_mapping "
+                "populated; that second call produces the Corrected Census XLSX and the "
+                "DSP->Amazon side-car CSV.\n\n"
+                "Inputs:\n"
+                "  - work_location_mapping: {source_location: uzio_location} dict. User-supplied. "
+                "    When provided, the source's Location Description column is remapped in the "
+                "    Corrected Source.\n"
+                "  - job_title_mapping: {dsp_title: amazon_title} dict. User-supplied. When "
+                "    provided, writes a side-car CSV (DSP Job Title | Amazon Job Title) into the "
+                "    audit inbox alongside the corrected XLSX. The cleaned census file is NOT "
+                "    mutated by this — same as the Streamlit behavior; the CSV is a separate "
+                "    artifact.\n"
+                "  - discover_only=true: redundant with the default (no mappings + no "
+                "    skip_mappings) but kept for explicit signaling.\n"
+                "  - skip_mappings=true: ONLY use when the user has EXPLICITLY told you to skip "
+                "    the mapping step (e.g. 'just run the auto-fixes, no mapping prompt'). Applies "
+                "    the auto-corrections (FLSA alignment, Smart Driver, Status/Type mapping, Zip "
+                "    cleanup, Gender column, Email fallback, Manager sorting, Date formatting, "
+                "    etc.) and writes the cleaned XLSX without asking about locations or titles.\n\n"
+                "Apply-mode auto-corrections (when at least one mapping is provided OR "
+                "skip_mappings=true): FLSA alignment, Smart Driver, Status/Type mapping, Zip "
+                "cleanup, Gender column, Email fallback, Manager sorting, Date formatting. All "
+                "always enabled — no toggle parameters needed.\n\n"
                 "MANDATORY: For stability, always use copy_to_audit_inbox first and then use 'file_path'. "
                 "Do NOT use 'file_base64' for files > 1MB."
             ),
@@ -646,16 +662,20 @@ async def handle_list_tools() -> list[types.Tool]:
                     "filename": {"type": "string"},
                     "discover_only": {
                         "type": "boolean",
-                        "description": "If true, return only the unique work locations + distinct job titles + Amazon catalog. No XLSX is written.",
+                        "description": "Optional. Same as default behavior when no mappings provided — returns discovery JSON and writes nothing.",
+                    },
+                    "skip_mappings": {
+                        "type": "boolean",
+                        "description": "ONLY set true when the user has explicitly told you they don't want the mapping step. Skips discovery and applies auto-fixes only.",
                     },
                     "work_location_mapping": {
                         "type": "object",
-                        "description": "Optional {source_location: uzio_location} dict. When provided, the source's location column is remapped in the Corrected Source.",
+                        "description": "User-supplied {source_location: uzio_location} dict. Get this from the user AFTER showing the discovery payload — NEVER pick values yourself. When provided, the source's location column is remapped in the Corrected Source.",
                         "additionalProperties": {"type": "string"},
                     },
                     "job_title_mapping": {
                         "type": "object",
-                        "description": "Optional {dsp_title: amazon_title} dict. When provided, writes a side-car DSP→Amazon mapping CSV next to the corrected XLSX. Does NOT modify the cleaned census file.",
+                        "description": "User-supplied {dsp_title: amazon_title} dict. Get this from the user AFTER showing the discovery payload — NEVER pick values yourself. When provided, writes a side-car DSP->Amazon mapping CSV next to the corrected XLSX. Does NOT modify the cleaned census file.",
                         "additionalProperties": {"type": "string"},
                     },
                 },
@@ -1492,14 +1512,20 @@ async def handle_call_tool(name: str, arguments: dict | None):
             require_vendor(content, filename, "adp", "adp_census_sanity")
 
             discover_only = bool(arguments.get("discover_only"))
+            skip_mappings = bool(arguments.get("skip_mappings"))
             location_mappings = arguments.get("work_location_mapping") or {}
             job_title_mappings = arguments.get("job_title_mapping") or {}
 
-            # Discovery mode: read the file, surface unique locations + distinct
-            # DSP job titles (auto-matched against the Amazon catalog) + the catalog
-            # itself, then bail without producing the corrected XLSX. The caller
-            # builds the two mapping dicts from this response and re-calls.
-            if discover_only:
+            # Default behavior: when the caller provides neither mapping AND has
+            # not opted out via skip_mappings, run discovery. This forces the
+            # two-step "ask the user about mappings" flow rather than silently
+            # producing a Corrected Census that ignores both mappings.
+            should_discover = (
+                discover_only
+                or (not location_mappings and not job_title_mappings and not skip_mappings)
+            )
+
+            if should_discover:
                 from utils.audit_utils import find_header_and_data
                 from core.job_title_mapper import (
                     load_amazon_catalog, extract_distinct_titles,
