@@ -623,6 +623,18 @@ async def handle_list_tools() -> list[types.Tool]:
                 "(FLSA alignment, Smart Driver, Status/Type mapping, Zip cleanup, Gender column, "
                 "Email fallback, Manager sorting, Date formatting, etc.). No toggle parameters needed — "
                 "all fixes are always enabled.\n\n"
+                "Two optional mappings give parity with the Streamlit sanity check screen "
+                "(both default to empty / not applied):\n"
+                "  - work_location_mapping: {source_location: uzio_location} dict. When provided, "
+                "    the source's Location Description column is remapped in the Corrected Source.\n"
+                "  - job_title_mapping: {dsp_title: amazon_title} dict. When provided, writes a "
+                "    side-car CSV (DSP Job Title | Amazon Job Title) into the audit inbox alongside "
+                "    the corrected XLSX. The cleaned census file is NOT mutated by this — same as "
+                "    the Streamlit behavior; the CSV is a separate artifact.\n\n"
+                "Set discover_only=true to skip writing and instead return the unique work "
+                "locations + distinct DSP job titles (with auto-Amazon match) + Amazon catalog "
+                "so the caller can build both mapping dicts. Re-call with discover_only omitted "
+                "and the two mapping params populated to apply.\n\n"
                 "MANDATORY: For stability, always use copy_to_audit_inbox first and then use 'file_path'. "
                 "Do NOT use 'file_base64' for files > 1MB."
             ),
@@ -632,6 +644,20 @@ async def handle_list_tools() -> list[types.Tool]:
                     "file_path": {"type": "string", "description": PATH_DESC},
                     "file_base64": {"type": "string", "description": "Fallback: base64 encoded ADP Census export"},
                     "filename": {"type": "string"},
+                    "discover_only": {
+                        "type": "boolean",
+                        "description": "If true, return only the unique work locations + distinct job titles + Amazon catalog. No XLSX is written.",
+                    },
+                    "work_location_mapping": {
+                        "type": "object",
+                        "description": "Optional {source_location: uzio_location} dict. When provided, the source's location column is remapped in the Corrected Source.",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "job_title_mapping": {
+                        "type": "object",
+                        "description": "Optional {dsp_title: amazon_title} dict. When provided, writes a side-car DSP→Amazon mapping CSV next to the corrected XLSX. Does NOT modify the cleaned census file.",
+                        "additionalProperties": {"type": "string"},
+                    },
                 },
             },
         ),
@@ -1464,6 +1490,59 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 if arguments.get("file_path") else "upload.xlsx"
             )
             require_vendor(content, filename, "adp", "adp_census_sanity")
+
+            discover_only = bool(arguments.get("discover_only"))
+            location_mappings = arguments.get("work_location_mapping") or {}
+            job_title_mappings = arguments.get("job_title_mapping") or {}
+
+            # Discovery mode: read the file, surface unique locations + distinct
+            # DSP job titles (auto-matched against the Amazon catalog) + the catalog
+            # itself, then bail without producing the corrected XLSX. The caller
+            # builds the two mapping dicts from this response and re-calls.
+            if discover_only:
+                from utils.audit_utils import find_header_and_data
+                from core.job_title_mapper import (
+                    load_amazon_catalog, extract_distinct_titles,
+                )
+                df_discover, _, _ = find_header_and_data(content, filename)
+                loc_col = ADP_FIELD_MAP.get("Work Location")
+                unique_locations = []
+                if loc_col and loc_col in df_discover.columns:
+                    unique_locations = sorted(
+                        {str(v).strip() for v in df_discover[loc_col].dropna()
+                         if str(v).strip() and str(v).strip().lower() != "nan"},
+                        key=str.lower,
+                    )
+                distinct_titles = extract_distinct_titles(content, filename, "adp")
+                catalog = load_amazon_catalog()
+                catalog_titles = [c.get("Job Title", "") for c in catalog if c.get("Job Title")]
+                # Auto-match DSP title to Amazon title by case-insensitive exact
+                # equality. Empty 'amazon_auto_match' means the caller must pick.
+                catalog_lookup = {t.strip().lower(): t for t in catalog_titles}
+                title_rows = [
+                    {
+                        "dsp": t,
+                        "amazon_auto_match": catalog_lookup.get(t.strip().lower(), ""),
+                    }
+                    for t in distinct_titles
+                ]
+                payload = {
+                    "step": "discover",
+                    "unique_work_locations": unique_locations,
+                    "work_location_count": len(unique_locations),
+                    "distinct_job_titles": title_rows,
+                    "job_title_count": len(title_rows),
+                    "amazon_catalog": catalog_titles,
+                    "instruction": (
+                        "Build two dicts from this response and re-call adp_census_sanity:\n"
+                        "  work_location_mapping = {source_loc: uzio_loc} from unique_work_locations\n"
+                        "  job_title_mapping     = {dsp_title: amazon_title} from distinct_job_titles "
+                        "(pre-fill from amazon_auto_match where non-empty; pick from amazon_catalog "
+                        "for the rest). Both dicts are optional — omit either to skip that mapping."
+                    ),
+                }
+                return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
             fix_options = {
                 'fix_flsa': True, 'fix_emails': True, 'fix_job_title': True,
                 'fix_driver_smart': True, 'fix_license': True,
@@ -1477,6 +1556,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
             xlsx_bytes, summary = generate_corrected_census_xlsx(
                 content, ADP_FIELD_MAP, fix_options=fix_options,
                 filename=filename, sort_by_manager=True,
+                location_mappings=location_mappings,
             )
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -1484,10 +1564,23 @@ async def handle_call_tool(name: str, arguments: dict | None):
             out_path = os.path.join(AUDIT_INBOX, f"ADP_Cleaned_{stamp}.xlsx")
             with open(out_path, "wb") as f:
                 f.write(xlsx_bytes)
+
+            # Job title side-car CSV (only when caller supplied a mapping). This
+            # matches the Streamlit behavior where the cleaned census is unchanged
+            # and the mapping ships as a parallel artifact.
+            job_title_csv_path = None
+            if job_title_mappings:
+                from core.job_title_mapper import write_mapping_csv
+                job_title_csv_path, _ = write_mapping_csv(
+                    job_title_mappings, vendor="adp", out_dir=AUDIT_INBOX,
+                )
+
             payload = {
                 "output_file": out_path,
                 "summary": summary,
                 "applied_toggles": {k: v for k, v in fix_options.items() if v},
+                "work_location_mapping_applied": bool(location_mappings),
+                "job_title_mapping_csv": job_title_csv_path,
             }
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
