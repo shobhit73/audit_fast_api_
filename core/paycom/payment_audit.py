@@ -89,6 +89,9 @@ def run_paycom_payment_audit(uzio_content, paycom_content):
     pc_empid_col = next((c for c in df_paycom.columns if "Employee_Code" in c or "Emp Code" in c), df_paycom.columns[0])
     pc_first_col = next((c for c in df_paycom.columns if "Firstname" in c or "First Name" in c), "")
     pc_last_col = next((c for c in df_paycom.columns if "Lastname" in c or "Last Name" in c), "")
+    # Employee status column (exact match only — avoid Bonus_Status / Net_Status / DOL_Status etc.)
+    pc_status_col = next((c for c in df_paycom.columns if str(c).strip().lower() in ("employee_status", "employee status")), "")
+    paycom_status_map = {}  # resolved EmpID -> Paycom Employee_Status
     uzio_keys = set(uzio_map.keys())
 
     paycom_accounts = []
@@ -101,6 +104,12 @@ def run_paycom_payment_audit(uzio_content, paycom_content):
             # try padding
             for w in [3, 4, 5]:
                 if s_id.zfill(w) in uzio_keys: emp_id = s_id.zfill(w); break
+
+        # Capture Paycom employee status (first non-blank wins per employee)
+        if pc_status_col:
+            stat = norm_str(row.get(pc_status_col))
+            if stat and emp_id not in paycom_status_map:
+                paycom_status_map[emp_id] = stat
 
         dist_entries = []
         total_dist_pct = 0.0
@@ -218,8 +227,12 @@ def run_paycom_payment_audit(uzio_content, paycom_content):
                     "Field": field, "UZIO_Value": "Not Found", "Paycom_Value": _get_field_val(p, field),
                     "Paycom_SourceOfTruth_Status": STATUS_VAL_MISSING_UZIO})
 
-    comparison_detail = rows
     df_cd = pd.DataFrame(rows)
+    # Employee Status sourced from Paycom (blank for Uzio-only employees not in Paycom)
+    if not df_cd.empty:
+        df_cd.insert(2, "Employee Status",
+                     df_cd["Employee ID"].map(lambda e: paycom_status_map.get(e, "")))
+    comparison_detail = df_cd.to_dict(orient="records")
     field_summary = []
     if not df_cd.empty:
         pivot = df_cd.pivot_table(index="Field", columns="Paycom_SourceOfTruth_Status",
