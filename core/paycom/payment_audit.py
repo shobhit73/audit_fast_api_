@@ -8,6 +8,16 @@ STATUS_VAL_MISSING_UZIO = "Value missing in Uzio (Paycom has value)"
 STATUS_VAL_MISSING_PAYCOM = "Value missing in Paycom (Uzio has value)"
 STATUS_MISSING_UZIO = "Employee ID Not Found in Uzio"
 STATUS_MISSING_PAYCOM = "Employee ID Not Found in Paycom"
+# Difference that is ONLY a missing leading zero (Paycom 028248003 vs Uzio
+# 28248003) = the Excel/Uzio numeric-coercion artifact, not a real mismatch.
+STATUS_LEADING_ZERO = "Leading Zero Dropped (likely export artifact)"
+
+def _is_leading_zero_drop(a, b):
+    a, b = str(a).strip(), str(b).strip()
+    if not a or not b or a == b:
+        return False
+    sa, sb = a.lstrip("0"), b.lstrip("0")
+    return sa == sb and sa != ""
 
 def norm_str(x):
     return str(x).strip() if x is not None and pd.notna(x) else ""
@@ -52,6 +62,8 @@ def _compare_field(field, u_val, p_val):
             if abs(float(u_n) - float(p_n)) < 0.01: return STATUS_MATCH
         except: pass
         return STATUS_MISMATCH
+    if field in ("Account Number", "Routing Number") and _is_leading_zero_drop(u_n, p_n):
+        return STATUS_LEADING_ZERO
     return STATUS_MATCH if u_n == p_n else STATUS_MISMATCH
 
 def run_paycom_payment_audit(uzio_content, paycom_content):
@@ -237,11 +249,20 @@ def run_paycom_payment_audit(uzio_content, paycom_content):
     if not df_cd.empty:
         pivot = df_cd.pivot_table(index="Field", columns="Paycom_SourceOfTruth_Status",
             values="Employee ID", aggfunc="count", fill_value=0)
-        for c in [STATUS_MATCH, STATUS_MISMATCH, STATUS_VAL_MISSING_UZIO, STATUS_VAL_MISSING_PAYCOM,
-                  STATUS_MISSING_UZIO, STATUS_MISSING_PAYCOM]:
+        for c in [STATUS_MATCH, STATUS_MISMATCH, STATUS_LEADING_ZERO, STATUS_VAL_MISSING_UZIO,
+                  STATUS_VAL_MISSING_PAYCOM, STATUS_MISSING_UZIO, STATUS_MISSING_PAYCOM]:
             if c not in pivot.columns: pivot[c] = 0
         pivot["Total"] = pivot.sum(axis=1)
         field_summary = pivot.reset_index().to_dict(orient="records")
+
+    leading_zero_issues = [
+        {"Employee ID": r["Employee ID"], "Employee Name": r["Employee Name"],
+         "Employee Status": r.get("Employee Status", ""), "Field": r["Field"],
+         "Correct value (Paycom)": r["Paycom_Value"],
+         "Stored in Uzio (zero dropped)": r["UZIO_Value"]}
+        for r in comparison_detail
+        if r["Paycom_SourceOfTruth_Status"] == STATUS_LEADING_ZERO
+    ]
 
     uzio_k = set(uzio_emp_names.keys())
     paycom_k = set(paycom_map.keys())
@@ -253,10 +274,14 @@ def run_paycom_payment_audit(uzio_content, paycom_content):
         {"Metric": "Employees missing in Uzio (Paycom only)", "Value": len(paycom_k - uzio_k)},
         {"Metric": "Total comparison rows", "Value": len(comparison_detail)},
         {"Metric": "Total NOT OK rows", "Value": sum(1 for r in comparison_detail if r["Paycom_SourceOfTruth_Status"] != STATUS_MATCH)},
+        {"Metric": "Leading-zero drops (account/routing)", "Value": len(leading_zero_issues)},
     ]
 
-    return {
+    result = {
         "Summary": summary,
         "Field_Summary_By_Status": field_summary,
         "Comparison_Detail_AllFields": comparison_detail
     }
+    if leading_zero_issues:
+        result["Leading_Zero_Issues"] = leading_zero_issues
+    return result
