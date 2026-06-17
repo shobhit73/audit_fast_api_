@@ -235,7 +235,16 @@ def norm_ssn_canonical(x):
     s = re.sub(r"\D", "", str(x).strip().replace("-", "").replace(" ", "").replace(".0", ""))
     return s.zfill(9)[-9:] if s else ""
 
-def find_header_and_data(file_content, filename):
+def find_header_and_data(file_content, filename, dtype=None):
+    """Locate the real header row and read the data.
+
+    `dtype` is forwarded to pandas. Pass `dtype=str` when the caller must
+    preserve leading zeros (routing/account numbers, SSN, zip, employee IDs) --
+    the default (None) lets pandas infer types, which is required by the SQL /
+    money-math callers (query_data_sql, total_comparison). Without dtype=str an
+    all-numeric column like ROUTING NUMBER is read as int64 and 011000015 loses
+    its leading zero at read time.
+    """
     file_io = io.BytesIO(file_content)
     if filename.lower().endswith('.csv'):
         # Peek first 50 lines to find header
@@ -247,7 +256,7 @@ def find_header_and_data(file_content, filename):
                 header_idx = i
                 break
         file_io.seek(0)
-        df = pd.read_csv(file_io, header=header_idx)
+        df = pd.read_csv(file_io, header=header_idx, dtype=dtype)
         # Use the peek lines to find header_top if needed
         header_top = lines[header_idx - 1].split(',') if header_idx > 0 else None
     else:
@@ -260,7 +269,7 @@ def find_header_and_data(file_content, filename):
             if any(k in row_str for k in ["employee id", "employee name", "associate id", "employee code", "employee_code"]):
                 header_idx = i
                 break
-        df = pd.read_excel(xls, sheet_name=sheet, header=header_idx)
+        df = pd.read_excel(xls, sheet_name=sheet, header=header_idx, dtype=dtype)
         header_top = df_peek.iloc[header_idx - 1].tolist() if header_idx > 0 else None
     return df, header_top, filename
 

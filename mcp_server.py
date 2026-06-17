@@ -37,6 +37,11 @@ from core.adp.misc_audits import (
 from core.adp.census_generator import run_adp_census_generation
 from core.paycom.census_generator import run_paycom_census_generation
 from core.adp.prior_payroll_sanity import run_adp_prior_payroll_sanity
+from core.adp.payment_method_sanity import run_adp_payment_method_sanity
+from core.adp.fit_sit_sanity import run_adp_fit_sit_sanity
+from core.adp.payroll_setup_agent import (
+    run_adp_payroll_setup_agent, discover_adp_payroll_setup_agent,
+)
 from core.adp.selective_census_sync import run_adp_selective_census_sync, discover_mappings as adp_selective_discover
 from core.paycom.selective_census_sync import run_paycom_selective_census_sync, discover_mappings as paycom_selective_discover
 from core.common.paycom_consolidated_audit import run_paycom_consolidated_audit
@@ -796,6 +801,76 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="adp_payment_method_sanity",
+            description=(
+                "[VENDOR: ADP only] [INPUT: single ADP Payment Method / Direct "
+                "Deposit export (.xlsx/.csv) with columns Associate ID, Deposit "
+                "Type, Deposit Percent, Deposit Amount, Routing/Account Number]\n"
+                "[DO NOT USE FOR: UZIO / Paycom files - the runtime guard will "
+                "refuse them. This is NOT the two-file Uzio-vs-ADP comparison; "
+                "for that use 'adp_payment_audit'.]\n\n"
+                "Validates an ADP payment-method export against Uzio's "
+                "direct-deposit DISTRIBUTION rules and auto-corrects unsupported "
+                "configurations. One row per employee = one account; multiple "
+                "rows = multiple accounts. Rules enforced:\n"
+                "  R2. Percent distribution: exactly one Full (its % may be "
+                "blank) + the rest Partial %; the percents must sum to 100%.\n"
+                "  R3. Amount distribution: exactly one Full (remainder) + any "
+                "number of Partial (amount) accounts.\n"
+                "  R4. Mixed Percent + Amount is UNSUPPORTED by Uzio -> auto-fix "
+                "keeps the Partial % rows and splits the remaining percentage "
+                "equally across the non-percent accounts.\n"
+                "  R5. A lone Partial / Partial % row is invalid -> auto-fixed to "
+                "Full with Deposit Amount and Percent cleared.\n\n"
+                "Output (written to the Audit Files inbox): an XLSX with four "
+                "sheets (Summary, Issues, Before_After, Corrected_Source) AND a "
+                "Corrected_Source CSV (plain UTF-8, no BOM) for API ingestion.\n\n"
+                "MANDATORY: For stability, copy the file with copy_to_audit_inbox "
+                "first, then pass 'file_path'. Do NOT use 'file_base64' for files "
+                "> 1MB."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                    "file_base64": {"type": "string", "description": "Fallback: base64 encoded ADP Payment Method export"},
+                    "filename": {"type": "string", "description": "Optional filename hint, used for extension dispatch when file_base64 is supplied."},
+                    "client_name": {"type": "string", "description": "Optional client name; used in the output filenames."},
+                },
+            },
+        ),
+        types.Tool(
+            name="adp_fit_sit_sanity",
+            description=(
+                "[VENDOR: ADP only] [INPUT: single ADP FIT/SIT export (.csv/.xlsx) "
+                "with columns Dependents, Non-Resident Alien, State Marital Status "
+                "Description (plus Associate ID / name for the change log)]\n"
+                "[DO NOT USE FOR: UZIO / Paycom files - the runtime guard will "
+                "refuse them.]\n\n"
+                "Fills blanks in exactly three columns with the defaults Uzio "
+                "expects so the file is API-ready: Dependents -> '0', "
+                "Non-Resident Alien -> 'No', State Marital Status Description -> "
+                "'Single'. Every other column is left untouched (the downstream "
+                "API handles the rest). Errors out if any of the three columns is "
+                "absent.\n\n"
+                "Output (written to the Audit Files inbox): an XLSX with three "
+                "sheets (Summary, Changes, Corrected_Source) AND a Corrected_Source "
+                "CSV (plain UTF-8, no BOM) for API ingestion.\n\n"
+                "MANDATORY: For stability, copy the file with copy_to_audit_inbox "
+                "first, then pass 'file_path'. Do NOT use 'file_base64' for files "
+                "> 1MB."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": PATH_DESC},
+                    "file_base64": {"type": "string", "description": "Fallback: base64 encoded ADP FIT/SIT export"},
+                    "filename": {"type": "string", "description": "Optional filename hint, used for extension dispatch when file_base64 is supplied."},
+                    "client_name": {"type": "string", "description": "Optional client name; used in the output filenames."},
+                },
+            },
+        ),
+        types.Tool(
             name="adp_prior_payroll_setup_helper",
             description=(
                 "[VENDOR: ADP only] [INPUT: SANITIZED ADP Prior Payroll file (.xlsx/.csv) -- "
@@ -841,6 +916,70 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "Fallback: base64 encoded State Tax Code master CSV.",
                     },
+                },
+            },
+        ),
+        types.Tool(
+            name="adp_payroll_setup_agent",
+            description=(
+                "[VENDOR: ADP only] [INPUT: ADP Prior Payroll export (.xlsx/.csv)] "
+                "[SECONDARY INPUT: State Tax Code master CSV - REQUIRED for the Tax "
+                "Mapping output]\n"
+                "[DO NOT USE FOR: UZIO / Paycom files - the runtime guard refuses them.]\n\n"
+                "The 'ADP Payroll Analyzer' (Streamlit sidebar: 'ADP - Payroll Setup "
+                "Agent'). Three analyses in one pass:\n"
+                "  1. Earnings Classifier - splits earnings into Hourly vs Flat and "
+                "runs a statistical Discretionary vs Non-Discretionary test (actual "
+                "OT rate vs 1.5x base rate, avg>0.15 & median>0.05 => Non-Discretionary).\n"
+                "  2. Tax Mapping - maps ADP tax columns to Uzio tax codes ('Hansen "
+                "format'): federal taxes + ONE ROW PER STATE the user confirms.\n"
+                "  3. Deduction Classifier - Pre-Tax vs Post-Tax via per-row subset-sum "
+                "on GAP = Total Earnings - Federal Income Taxable, decided by 60% "
+                "majority.\n\n"
+                "**TWO-STEP, ASK-FIRST FLOW (mirrors the on-screen state multiselect - "
+                "do NOT assume or default).** Called WITHOUT 'selected_states', this "
+                "tool returns a DISCOVERY payload (detected states are a HINT only) and "
+                "writes nothing. You MUST show the user the detected states and ask which "
+                "states employees worked in, then re-call with 'selected_states' set to "
+                "the user's explicit confirmed list. Nothing is defaulted to the detected "
+                "states, and no bundled State Tax CSV is silently used.\n\n"
+                "Output on the apply call (written to the Audit Files inbox): a 3-sheet "
+                "XLSX (Earnings_Summary, Tax_Mapping, Deduction_Classification) plus three "
+                "plain-UTF-8 (no BOM) CSVs.\n\n"
+                "NOTE: distinct from 'adp_prior_payroll_setup_helper', which covers the "
+                "same concerns with different algorithms (conservative one-proof FLSA / "
+                "pre-tax rules and the Payroll_Mappings_Tax_Mapping_CORRECTED tax format)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": PATH_DESC + " (ADP Prior Payroll export)"},
+                    "file_base64": {"type": "string", "description": "Fallback: base64 encoded ADP Prior Payroll export"},
+                    "filename": {"type": "string", "description": "Optional filename hint, used for extension dispatch when file_base64 is supplied."},
+                    "selected_states": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "User-confirmed list of state abbreviations employees worked in "
+                            "(e.g. ['CA','TX']). OMIT on the first call to get the discovery "
+                            "payload; provide it ONLY after the user explicitly confirms. Never "
+                            "fill this in yourself from the detected list."
+                        ),
+                    },
+                    "state_tax_master_path": {
+                        "type": "string",
+                        "description": (
+                            "Local path to the State Tax Code master CSV (columns: "
+                            "state_abbreviation, tax_code, unique_tax_id, tax_name, sub_tax_desc). "
+                            "Required for the apply call. Falls back to STATE_TAX_MASTER_PATH env "
+                            "var, else state_tax_master_base64."
+                        ),
+                    },
+                    "state_tax_master_base64": {
+                        "type": "string",
+                        "description": "Fallback: base64 encoded State Tax Code master CSV.",
+                    },
+                    "client_name": {"type": "string", "description": "Optional client name; used in the output filenames."},
                 },
             },
         ),
@@ -1738,6 +1877,60 @@ async def handle_call_tool(name: str, arguments: dict | None):
             }
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
+        elif name == "adp_payment_method_sanity":
+            content = load_file(arguments, "file_path", "file_base64")
+            file_path_arg = arguments.get("file_path")
+            filename = arguments.get("filename") or (
+                os.path.basename(file_path_arg.strip().strip('"')) if file_path_arg else "adp_payment.xlsx"
+            )
+            require_vendor(content, filename, "adp", "adp_payment_method_sanity")
+            xlsx_bytes, csv_bytes, summary = run_adp_payment_method_sanity(content, filename)
+
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            client_name = (arguments.get("client_name") or "Client").strip() or "Client"
+            if not os.path.exists(AUDIT_INBOX):
+                os.makedirs(AUDIT_INBOX, exist_ok=True)
+            xlsx_path = os.path.join(AUDIT_INBOX, f"{client_name}_ADP_Payment_Method_Sanity_{stamp}.xlsx")
+            with open(xlsx_path, "wb") as f:
+                f.write(xlsx_bytes)
+            csv_path = os.path.join(AUDIT_INBOX, f"{client_name}_ADP_Payment_Method_Corrected_{stamp}.csv")
+            with open(csv_path, "wb") as f:
+                f.write(csv_bytes)
+            payload = {
+                "output_file": xlsx_path,
+                "corrected_csv": csv_path,
+                "summary": summary,
+            }
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
+        elif name == "adp_fit_sit_sanity":
+            content = load_file(arguments, "file_path", "file_base64")
+            file_path_arg = arguments.get("file_path")
+            filename = arguments.get("filename") or (
+                os.path.basename(file_path_arg.strip().strip('"')) if file_path_arg else "adp_fit_sit.xlsx"
+            )
+            require_vendor(content, filename, "adp", "adp_fit_sit_sanity")
+            xlsx_bytes, csv_bytes, summary = run_adp_fit_sit_sanity(content, filename)
+
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            client_name = (arguments.get("client_name") or "Client").strip() or "Client"
+            if not os.path.exists(AUDIT_INBOX):
+                os.makedirs(AUDIT_INBOX, exist_ok=True)
+            xlsx_path = os.path.join(AUDIT_INBOX, f"{client_name}_ADP_FIT_SIT_Sanity_{stamp}.xlsx")
+            with open(xlsx_path, "wb") as f:
+                f.write(xlsx_bytes)
+            csv_path = os.path.join(AUDIT_INBOX, f"{client_name}_ADP_FIT_SIT_Corrected_{stamp}.csv")
+            with open(csv_path, "wb") as f:
+                f.write(csv_bytes)
+            payload = {
+                "output_file": xlsx_path,
+                "corrected_csv": csv_path,
+                "summary": summary,
+            }
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
         elif name == "adp_prior_payroll_setup_helper":
             content = load_file(arguments, "file_path", "file_base64")
             file_path_arg = arguments.get("file_path")
@@ -1778,6 +1971,57 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 ),
             }
             return [types.TextContent(type="text", text=json.dumps(summary_info, indent=2, default=_json_default))]
+
+        elif name == "adp_payroll_setup_agent":
+            content = load_file(arguments, "file_path", "file_base64")
+            file_path_arg = arguments.get("file_path")
+            filename = arguments.get("filename") or (
+                os.path.basename(file_path_arg.strip().strip('"')) if file_path_arg else "adp_prior_payroll.xlsx"
+            )
+            require_vendor(content, filename, "adp", "adp_payroll_setup_agent")
+
+            # Resolve the State Tax master (path > env > base64). No bundled default.
+            master_path = arguments.get("state_tax_master_path") or os.environ.get("STATE_TAX_MASTER_PATH", "")
+            master_b64 = arguments.get("state_tax_master_base64")
+            master_content = b""
+            if master_path and os.path.isfile(master_path.strip().strip('"')):
+                with open(master_path.strip().strip('"'), "rb") as f:
+                    master_content = f.read()
+            elif master_b64:
+                master_content = base64.b64decode(master_b64)
+
+            # ASK-FIRST: no selected_states -> discovery only, write nothing.
+            selected_states = arguments.get("selected_states")
+            if not selected_states:
+                payload = discover_adp_payroll_setup_agent(
+                    content, filename, state_tax_master_content=(master_content or None),
+                )
+                return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
+
+            xlsx_bytes, csv_outputs, summary = run_adp_payroll_setup_agent(
+                content, filename, selected_states=selected_states,
+                state_tax_master_content=master_content,
+            )
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+            client_name = (arguments.get("client_name") or "Client").strip() or "Client"
+            if not os.path.exists(AUDIT_INBOX):
+                os.makedirs(AUDIT_INBOX, exist_ok=True)
+            xlsx_path = os.path.join(AUDIT_INBOX, f"{client_name}_ADP_Payroll_Setup_Agent_{stamp}.xlsx")
+            with open(xlsx_path, "wb") as f:
+                f.write(xlsx_bytes)
+            csv_paths = {}
+            for label, data in csv_outputs.items():
+                p = os.path.join(AUDIT_INBOX, f"{client_name}_ADP_{label}_{stamp}.csv")
+                with open(p, "wb") as f:
+                    f.write(data)
+                csv_paths[label] = p
+            payload = {
+                "output_file": xlsx_path,
+                "csv_files": csv_paths,
+                "summary": summary,
+            }
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
         elif name == "adp_census_generator":
             content = load_file(arguments, "file_path", "file_base64")
@@ -2009,11 +2253,15 @@ async def handle_call_tool(name: str, arguments: dict | None):
             import pandas as pd, io
             from utils.audit_utils import norm_id, find_header_and_data
             
-            # Use robust header detection
+            # Use robust header detection. dtype=str preserves leading zeros on
+            # routing/account numbers, SSN, zip, and numeric employee IDs -- this
+            # tool's whole job is faithful extraction with zero tampering, so we
+            # must NOT let pandas coerce 011000015 -> 11000015 at read time.
             filename = arguments.get("file_path", "upload.xlsx")
-            df, _, _ = find_header_and_data(content, filename)
-            # Ensure all columns are strings for consistency
-            df = df.astype(str)
+            df, _, _ = find_header_and_data(content, filename, dtype=str)
+            # Blank cells read back as NaN even with dtype=str; make them empty
+            # strings (not the literal "nan") for clean extraction output.
+            df = df.fillna("")
             
             target_ids = [norm_id(eid) for eid in arguments.get("employee_ids", [])]
             
