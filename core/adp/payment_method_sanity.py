@@ -105,6 +105,68 @@ def _round2(v):
     return round(float(v) + 1e-9, 2)
 
 
+# ---------------------------------------------------------
+# Rule A — de-duplicate identical accounts (same routing + account).
+# ADP exports the SAME bank account multiple times across effective dates
+# (account history), which the old logic mistook for multiple accounts and
+# demoted to "Partial % 0.00" (rejected by the API). We collapse same-account
+# rows to one, keeping the latest effective date, BEFORE the distribution logic
+# runs. This alone makes most multi-row employees valid again; genuine
+# multi-account employees (truly different routing/account) are left for the
+# existing distribution rules.
+# ---------------------------------------------------------
+def _norm_acct(v) -> str:
+    """Normalize a routing/account value for duplicate comparison — preserve
+    leading zeros, just trim whitespace and a trailing float '.0'."""
+    s = _norm_text(v)
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
+def _parse_eff(s) -> tuple:
+    """Parse an Effective Date (MM/DD/YYYY) to a sortable (Y, M, D) tuple.
+    Blank / unparseable -> (0, 0, 0) so it sorts oldest."""
+    parts = str(s or "").strip().split("/")
+    if len(parts) != 3:
+        return (0, 0, 0)
+    nums = []
+    for p in parts:
+        digits = "".join(ch for ch in p if ch.isdigit())
+        if not digits:
+            return (0, 0, 0)
+        nums.append(int(digits))
+    mm, dd, yy = nums
+    if yy < 100:
+        yy += 2000
+    return (yy, mm, dd)
+
+
+def _dedup_accounts(rows: list):
+    """Collapse rows that are the SAME bank account (same routing + account)
+    into one, keeping the row with the latest Effective Date. Rows with a blank
+    routing or account are never merged. Returns (kept_rows, dropped_rows),
+    preserving original row order in `kept`."""
+    best: dict = {}
+    for r in rows:
+        routing, account = _norm_acct(r.get("routing")), _norm_acct(r.get("account"))
+        if not routing or not account:
+            continue
+        key = (routing, account)
+        if key not in best or _parse_eff(r.get("eff")) > _parse_eff(best[key].get("eff")):
+            best[key] = r
+    kept, dropped = [], []
+    for r in rows:
+        routing, account = _norm_acct(r.get("routing")), _norm_acct(r.get("account"))
+        if not routing or not account:
+            kept.append(r)
+        elif best[(routing, account)] is r:
+            kept.append(r)
+        else:
+            dropped.append(r)
+    return kept, dropped
+
+
 def _fix_employee(rows: list, issues: list, emp_id: str, emp_name: str):
     """Mutate `rows` in place to a Uzio-compatible distribution and append issues.
 
@@ -386,10 +448,11 @@ def _fix_employee(rows: list, issues: list, emp_id: str, emp_name: str):
 def run_adp_payment_method_sanity(content: bytes, filename: str = "adp_payment.xlsx"):
     """Analyze + auto-fix an ADP payment-method export against Uzio rules.
 
-    Returns (xlsx_bytes, csv_bytes, summary_dict). The xlsx has four sheets
-    (Summary, Issues, Before_After, Corrected_Source); the csv is the
-    Corrected_Source as plain UTF-8 (NO BOM) for API ingestion. summary_dict is
-    JSON-serializable for the MCP response.
+    Returns (xlsx_bytes, csv_bytes, changelog_bytes, summary_dict). The xlsx has
+    four sheets (Summary, Issues, Before_After, Corrected_Source); csv_bytes is
+    the Corrected_Source and changelog_bytes is the Issues/Change Log, both plain
+    UTF-8 (NO BOM) for API ingestion. summary_dict is JSON-serializable for the
+    MCP response.
     """
     df = _read_adp_file(content, filename)
 
@@ -400,6 +463,7 @@ def run_adp_payment_method_sanity(content: bytes, filename: str = "adp_payment.x
     col_dep_type = _find_col(df, ["DEPOSIT TYPE", "Deposit Type"])
     col_percent = _find_col(df, ["DEPOSIT PERCENT", "Percent"])
     col_amount = _find_col(df, ["DEPOSIT AMOUNT", "Amount"])
+    col_eff = _find_col(df, ["EFFECTIVE DATE", "Effective"])
 
     required = {
         "Associate ID": col_emp,
@@ -438,14 +502,34 @@ def run_adp_payment_method_sanity(content: bytes, filename: str = "adp_payment.x
             "account": _norm_text(raw.get(col_account)) if col_account else "",
             "percent": _norm_money(raw.get(col_percent)) if col_percent else None,
             "amount": _norm_money(raw.get(col_amount)) if col_amount else None,
+            "eff": _norm_text(raw.get(col_eff)) if col_eff else "",
             "fixed_type": None,
             "fixed_percent": None,
             "fixed_amount": None,
         })
 
-    # Analyze + fix each employee
+    # Rule A — collapse duplicate same-account rows (keep latest effective date),
+    # then analyze + fix each employee on the de-duplicated rows.
     issues: list[dict] = []
+    dropped_idx: set = set()
     for emp_id in order:
+        kept, dropped = _dedup_accounts(per_emp[emp_id])
+        if dropped:
+            for d in dropped:
+                dropped_idx.add(d["idx"])
+            issues.append({
+                "Employee ID": emp_id,
+                "Employee Name": emp_name_map.get(emp_id, ""),
+                "Rule": "R1",
+                "Severity": "Auto-Fix",
+                "Issue": (
+                    f"{len(dropped)} duplicate account row(s): the same bank account "
+                    "(identical Routing + Account Number) appears more than once, only "
+                    "differing by effective date."
+                ),
+                "Action": "Kept the latest effective date and removed the older duplicate row(s).",
+            })
+            per_emp[emp_id] = kept
         _fix_employee(per_emp[emp_id], issues, emp_id, emp_name_map.get(emp_id, ""))
 
     # Build the corrected dataframe (preserve column order; rewrite the 3 fields)
@@ -461,6 +545,10 @@ def run_adp_payment_method_sanity(content: bytes, filename: str = "adp_payment.x
                 if col_amount:
                     val = r["fixed_amount"]
                     df_fixed.at[r["idx"], col_amount] = "" if val is None else f"{val:.2f}"
+
+    # Drop the removed duplicate rows (Rule A) from the corrected output.
+    if dropped_idx:
+        df_fixed = df_fixed.drop(index=[i for i in dropped_idx if i in df_fixed.index])
 
     # Issues frame (always has the columns even when empty)
     issues_df = pd.DataFrame(
@@ -533,6 +621,10 @@ def run_adp_payment_method_sanity(content: bytes, filename: str = "adp_payment.x
     # which Excel renders literally without scientific notation.
     csv_bytes = df_fixed_clean.to_csv(index=False).encode("utf-8")
 
+    # Change Log = every fix / flag the tool recorded (Employee ID, Name, Rule,
+    # Severity, Issue, Action). Plain UTF-8, NO BOM (same rule as the corrected CSV).
+    changelog_bytes = issues_df.to_csv(index=False).encode("utf-8")
+
     # JSON-serializable summary for the MCP response. Issues are usually small;
     # cap the before/after preview so a huge file can't blow the token budget.
     PREVIEW_CAP = 300
@@ -546,4 +638,4 @@ def run_adp_payment_method_sanity(content: bytes, filename: str = "adp_payment.x
             f"Before/After truncated to first {PREVIEW_CAP} of {len(preview_df)} rows "
             "in this response; full detail is in the XLSX 'Before_After' sheet."
         )
-    return out.getvalue(), csv_bytes, summary
+    return out.getvalue(), csv_bytes, changelog_bytes, summary
