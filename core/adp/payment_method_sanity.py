@@ -614,7 +614,8 @@ def run_adp_payment_method_sanity(content: bytes, filename: str = "adp_payment.x
                     df_fixed.at[r["idx"], col_dep_type] = r["fixed_type"]
                 if col_percent:
                     val = r["fixed_percent"]
-                    df_fixed.at[r["idx"], col_percent] = "" if val is None else f"{val:.2f}"
+                    # Format Deposit Percent as "50.00 %" to match the ADP source style.
+                    df_fixed.at[r["idx"], col_percent] = "" if val is None else f"{val:.2f} %"
                 if col_amount:
                     val = r["fixed_amount"]
                     df_fixed.at[r["idx"], col_amount] = "" if val is None else f"{val:.2f}"
