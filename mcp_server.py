@@ -823,8 +823,10 @@ async def handle_list_tools() -> list[types.Tool]:
                 "  R5. A lone Partial / Partial % row is invalid -> auto-fixed to "
                 "Full with Deposit Amount and Percent cleared.\n\n"
                 "Output (written to the Audit Files inbox): an XLSX with four "
-                "sheets (Summary, Issues, Before_After, Corrected_Source) AND a "
-                "Corrected_Source CSV (plain UTF-8, no BOM) for API ingestion.\n\n"
+                "sheets (Summary, Issues, Before_After, Corrected_Source), a "
+                "Corrected_Source CSV (plain UTF-8, no BOM) for API ingestion, and "
+                "a separate Change Log CSV (every fix/flag: Employee ID, Name, "
+                "Rule, Severity, Issue, Action).\n\n"
                 "MANDATORY: For stability, copy the file with copy_to_audit_inbox "
                 "first, then pass 'file_path'. Do NOT use 'file_base64' for files "
                 "> 1MB."
@@ -1884,7 +1886,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 os.path.basename(file_path_arg.strip().strip('"')) if file_path_arg else "adp_payment.xlsx"
             )
             require_vendor(content, filename, "adp", "adp_payment_method_sanity")
-            xlsx_bytes, csv_bytes, summary = run_adp_payment_method_sanity(content, filename)
+            xlsx_bytes, csv_bytes, changelog_bytes, summary = run_adp_payment_method_sanity(content, filename)
 
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -1897,9 +1899,13 @@ async def handle_call_tool(name: str, arguments: dict | None):
             csv_path = os.path.join(AUDIT_INBOX, f"{client_name}_ADP_Payment_Method_Corrected_{stamp}.csv")
             with open(csv_path, "wb") as f:
                 f.write(csv_bytes)
+            changelog_path = os.path.join(AUDIT_INBOX, f"{client_name}_ADP_Payment_Method_ChangeLog_{stamp}.csv")
+            with open(changelog_path, "wb") as f:
+                f.write(changelog_bytes)
             payload = {
                 "output_file": xlsx_path,
                 "corrected_csv": csv_path,
+                "change_log_csv": changelog_path,
                 "summary": summary,
             }
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]

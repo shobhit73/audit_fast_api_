@@ -448,10 +448,11 @@ def _fix_employee(rows: list, issues: list, emp_id: str, emp_name: str):
 def run_adp_payment_method_sanity(content: bytes, filename: str = "adp_payment.xlsx"):
     """Analyze + auto-fix an ADP payment-method export against Uzio rules.
 
-    Returns (xlsx_bytes, csv_bytes, summary_dict). The xlsx has four sheets
-    (Summary, Issues, Before_After, Corrected_Source); the csv is the
-    Corrected_Source as plain UTF-8 (NO BOM) for API ingestion. summary_dict is
-    JSON-serializable for the MCP response.
+    Returns (xlsx_bytes, csv_bytes, changelog_bytes, summary_dict). The xlsx has
+    four sheets (Summary, Issues, Before_After, Corrected_Source); csv_bytes is
+    the Corrected_Source and changelog_bytes is the Issues/Change Log, both plain
+    UTF-8 (NO BOM) for API ingestion. summary_dict is JSON-serializable for the
+    MCP response.
     """
     df = _read_adp_file(content, filename)
 
@@ -620,6 +621,10 @@ def run_adp_payment_method_sanity(content: bytes, filename: str = "adp_payment.x
     # which Excel renders literally without scientific notation.
     csv_bytes = df_fixed_clean.to_csv(index=False).encode("utf-8")
 
+    # Change Log = every fix / flag the tool recorded (Employee ID, Name, Rule,
+    # Severity, Issue, Action). Plain UTF-8, NO BOM (same rule as the corrected CSV).
+    changelog_bytes = issues_df.to_csv(index=False).encode("utf-8")
+
     # JSON-serializable summary for the MCP response. Issues are usually small;
     # cap the before/after preview so a huge file can't blow the token budget.
     PREVIEW_CAP = 300
@@ -633,4 +638,4 @@ def run_adp_payment_method_sanity(content: bytes, filename: str = "adp_payment.x
             f"Before/After truncated to first {PREVIEW_CAP} of {len(preview_df)} rows "
             "in this response; full detail is in the XLSX 'Before_After' sheet."
         )
-    return out.getvalue(), csv_bytes, summary
+    return out.getvalue(), csv_bytes, changelog_bytes, summary
