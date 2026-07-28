@@ -1612,14 +1612,14 @@ async def handle_call_tool(name: str, arguments: dict | None):
                     return [types.TextContent(type="text", text="Error: mappings_json is not valid JSON.")]
 
             results = run_adp_total_comparison(adp_data, uzio_data, mappings)
-            summary = save_results_to_excel(results, "ADP_Total_Comparison")
+            summary = save_results_to_excel(results, "Uzio_ADP_PriorPayroll_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_census_audit":
             uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
             adp = load_file(arguments, "adp_file_path", "adp_raw_base64")
             results = run_adp_census_audit(uzio, adp)
-            summary = save_results_to_excel(results, "ADP_Census_Audit")
+            summary = save_results_to_excel(results, "Uzio_ADP_Census_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_deduction_audit":
@@ -1627,21 +1627,21 @@ async def handle_call_tool(name: str, arguments: dict | None):
             adp = load_file(arguments, "adp_file_path", "adp_raw_base64")
             mapping = json.loads(arguments.get("mapping_json", "{}"))
             results = run_adp_deduction_audit(uzio, adp, mapping)
-            summary = save_results_to_excel(results, "ADP_Deduction_Audit")
+            summary = save_results_to_excel(results, "Uzio_ADP_Deduction_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_payment_audit":
             uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
             adp = load_file(arguments, "adp_file_path", "adp_raw_base64")
             results = run_adp_payment_audit(uzio, adp)
-            summary = save_results_to_excel(results, "ADP_Payment_Audit")
+            summary = save_results_to_excel(results, "Uzio_ADP_Payment_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_withholding_audit":
             uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
             adp = load_file(arguments, "adp_file_path", "adp_raw_base64")
             results = run_adp_withholding_audit(uzio, adp)
-            summary = save_results_to_excel(results, "ADP_Withholding_Audit")
+            summary = save_results_to_excel(results, "Uzio_ADP_Withholding_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_census_sanity":
@@ -1760,7 +1760,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
             )
             client_name = (arguments.get("client_name") or "").strip()
             results = run_paycom_consolidated_audit(uzio_content, paycom_content, paycom_filename)
-            prefix = f"Paycom_Consolidated_Audit_{client_name}".rstrip("_") if client_name else "Paycom_Consolidated_Audit"
+            prefix = f"{client_name}_Uzio_Paycom_Consolidated_Audit_Report".lstrip("_") if client_name else "Uzio_Paycom_Consolidated_Audit_Report"
             summary = save_results_to_excel(results, prefix)
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
@@ -1773,7 +1773,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
                 return [types.TextContent(type="text", text="Error: provide at least one ADP file (adp_census_file_path, adp_dd_file_path, or adp_em_file_path).")]
             client_name = (arguments.get("client_name") or "").strip()
             results = run_adp_consolidated_audit(uzio_content, adp_census_content, adp_dd_content, adp_em_content)
-            prefix = f"ADP_Consolidated_Audit_{client_name}".rstrip("_") if client_name else "ADP_Consolidated_Audit"
+            prefix = f"{client_name}_Uzio_ADP_Consolidated_Audit_Report".lstrip("_") if client_name else "Uzio_ADP_Consolidated_Audit_Report"
             summary = save_results_to_excel(results, prefix)
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
@@ -2087,14 +2087,14 @@ async def handle_call_tool(name: str, arguments: dict | None):
             uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
             adp = load_file(arguments, "adp_file_path", "adp_raw_base64")
             results = run_adp_emergency_audit(uzio, adp)
-            summary = save_results_to_excel(results, "ADP_Emergency_Audit")
+            summary = save_results_to_excel(results, "Uzio_ADP_Emergency_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_license_audit":
             uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
             adp = load_file(arguments, "adp_file_path", "adp_raw_base64")
             results = run_adp_license_audit(uzio, adp)
-            summary = save_results_to_excel(results, "ADP_License_Audit")
+            summary = save_results_to_excel(results, "Uzio_ADP_License_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "adp_timeoff_audit":
@@ -2104,7 +2104,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
             # Timeoff usually returns a message if it's a template update
             if isinstance(results, dict) and "message" in results:
                 return [types.TextContent(type="text", text=json.dumps(results, indent=2, default=_json_default))]
-            summary = save_results_to_excel(results, "ADP_Timeoff_Audit")
+            summary = save_results_to_excel(results, "Uzio_ADP_Timeoff_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_prior_payroll_setup_helper":
@@ -2177,7 +2177,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
                     return [types.TextContent(type="text", text="Error: mappings_json is not valid JSON.")]
 
             results = run_paycom_total_comparison(paycom_data, uzio_data, mappings)
-            summary = save_results_to_excel(results, "Paycom_Total_Comparison")
+            summary = save_results_to_excel(results, "Uzio_Paycom_PriorPayroll_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_deduction_audit":
@@ -2185,35 +2185,35 @@ async def handle_call_tool(name: str, arguments: dict | None):
             paycom_data = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
             mapping = json.loads(arguments.get("mapping_json", "{}"))
             results = run_paycom_deduction_audit(uzio_data, paycom_data, mapping)
-            summary = save_results_to_excel(results, "Paycom_Deduction_Audit")
+            summary = save_results_to_excel(results, "Uzio_Paycom_Deduction_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_census_audit":
             uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
             paycom = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
             results = run_paycom_census_audit(uzio, paycom)
-            summary = save_results_to_excel(results, "Paycom_Census_Audit")
+            summary = save_results_to_excel(results, "Uzio_Paycom_Census_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_payment_audit":
             uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
             paycom = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
             results = run_paycom_payment_audit(uzio, paycom)
-            summary = save_results_to_excel(results, "Paycom_Payment_Audit")
+            summary = save_results_to_excel(results, "Uzio_Paycom_Payment_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_emergency_audit":
             uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
             paycom = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
             results = run_paycom_emergency_audit(uzio, paycom)
-            summary = save_results_to_excel(results, "Paycom_Emergency_Audit")
+            summary = save_results_to_excel(results, "Uzio_Paycom_Emergency_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_timeoff_audit":
             uzio = load_file(arguments, "uzio_file_path", "uzio_raw_base64")
             paycom = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
             results = run_paycom_timeoff_audit(uzio, paycom)
-            summary = save_results_to_excel(results, "Paycom_Timeoff_Audit")
+            summary = save_results_to_excel(results, "Uzio_Paycom_Timeoff_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_withholding_audit":
@@ -2221,7 +2221,7 @@ async def handle_call_tool(name: str, arguments: dict | None):
             paycom = load_file(arguments, "paycom_file_path", "paycom_raw_base64")
             mapping = load_file(arguments, "mapping_file_path", "mapping_file_base64") or None
             results = run_paycom_withholding_audit(uzio, paycom, mapping)
-            summary = save_results_to_excel(results, "Paycom_Withholding_Audit")
+            summary = save_results_to_excel(results, "Uzio_Paycom_Withholding_Audit_Report")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
         elif name == "paycom_census_sanity":
