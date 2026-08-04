@@ -1430,10 +1430,12 @@ async def handle_list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": PATH_DESC},
-                    "employee_ids": {"type": "array", "items": {"type": "string"}, "description": "List of Employee IDs to extract"},
+                    "employee_ids": {"type": "array", "items": {"type": "string"}, "description": "Employee IDs to extract (the manual subset / list)."},
+                    "reference_employee_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional Uzio reference/census Employee IDs IN ORDER. When given, output is sequenced by this order (mirrors the Streamlit 'Reference file order'); employee_ids then acts as a subset filter. IDs not in the reference are appended at the end."},
+                    "sequence_source": {"type": "string", "enum": ["reference", "manual"], "description": "When BOTH lists are given, which order wins: 'reference' (default) sequences by reference_employee_ids and treats employee_ids as a filter; 'manual' uses employee_ids order."},
                     "file_base64": {"type": "string", "description": "Fallback: base64 encoded file"},
                 },
-                "required": ["employee_ids"],
+                "required": [],
             },
         ),
         types.Tool(
@@ -2269,15 +2271,39 @@ async def handle_call_tool(name: str, arguments: dict | None):
             # strings (not the literal "nan") for clean extraction output.
             df = df.fillna("")
             
-            target_ids = [norm_id(eid) for eid in arguments.get("employee_ids", [])]
+            manual_ids = [norm_id(eid) for eid in arguments.get("employee_ids", [])]
+            reference_ids = [norm_id(eid) for eid in arguments.get("reference_employee_ids", [])]
+            if not manual_ids and not reference_ids:
+                return [types.TextContent(type="text", text="Error: provide employee_ids and/or reference_employee_ids.")]
+            seq_src = (arguments.get("sequence_source") or "").strip().lower()
+            if seq_src not in ("reference", "manual"):
+                seq_src = "reference" if reference_ids else "manual"
+            if reference_ids and manual_ids and seq_src == "reference":
+                _mset = set(manual_ids)
+                _ref_set = set(reference_ids)
+                ordered_ids = [i for i in reference_ids if i in _mset] + [i for i in manual_ids if i not in _ref_set]
+            elif reference_ids and not manual_ids:
+                ordered_ids = reference_ids
+            else:
+                ordered_ids = manual_ids
             
             # Find ID column (inlined normalization — no external dependency)
             id_col = next((c for c in df.columns if any(k in str(c).strip().lower() for k in ["employee id", "employee code", "associate id", "ee code", "employee_code"])), df.columns[0])
             
-            # Filter
-            filtered_df = df[df[id_col].apply(norm_id).isin(target_ids)]
-            
-            results = filtered_df.to_dict(orient="records")
+            # Emit rows in the requested sequence (all rows per ID kept, e.g. split DD).
+            _norm_series = df[id_col].apply(norm_id).tolist()
+            _groups = {}
+            for _pos, _nid in enumerate(_norm_series):
+                _groups.setdefault(_nid, []).append(_pos)
+            _recs = df.to_dict(orient="records")
+            results = []
+            _seen = set()
+            for _tid in ordered_ids:
+                if _tid in _seen:
+                    continue
+                _seen.add(_tid)
+                for _pos in _groups.get(_tid, []):
+                    results.append(_recs[_pos])
             summary = save_results_to_excel(results, "Selective_Extraction")
             return [types.TextContent(type="text", text=json.dumps(summary, indent=2, default=_json_default))]
 
