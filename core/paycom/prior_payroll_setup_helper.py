@@ -347,6 +347,227 @@ def _pick_bonus_example(bonus_info: dict):
     return samples[0]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Historic (WIDE-format) bonus classifier  —  automatic discretionary verdict
+# ─────────────────────────────────────────────────────────────────────────────
+# The close-quarter Prior Payroll Register (long format) carries NO hours, so the
+# FLSA "is OT paid at more than 1.5x the regular rate?" test can't be computed from
+# it — classify_bonus() above falls back to the WOT-vs-plain-OT dollar differential
+# and is usually "indeterminate" (Paycom emits weighted OT only, never both).
+#
+# The historic bot (paycom-historical-data.user.js) instead emits a WIDE per-period
+# report: one row per employee per pay period, with a paired "<Earning>(DRk)" dollar
+# column AND a "<Earning>_Hours(DRk)" hours column for every earning. With hours we
+# run the implementer's actual rule directly, per bonus, across all history:
+#
+#     weighted_ot_rate = OT$   / OT_hours
+#     blended_reg_rate = (Regular$ + dept_rate_regular$) / (their hours)
+#     ratio            = weighted_ot_rate / blended_reg_rate
+#
+#   ratio ~ 1.5  => OT is a plain 1.5x of the base rate; the bonus was NOT folded
+#                   into the regular rate  => DISCRETIONARY.
+#   ratio > 1.5  => Paycom recomputed a weighted regular rate that INCLUDES the
+#                   bonus before taking 1.5x  => NON-DISCRETIONARY.
+#
+# Multi-rate employees (a 2nd "dept_rate_regular" bucket at a different rate) are
+# handled by BLENDING both regular buckets, so multi-rate alone yields exactly 1.5x
+# and never masquerades as a bonus. Tiny-OT periods (rounding noise) are filtered by
+# _HIST_MIN_OT_HOURS, and the absolute-ratio signal is corroborated against the
+# non-bonus baseline (comparing the RATIO, which is immune to pay raises over time).
+
+_HIST_MIN_OT_HOURS = 2.0        # ignore OT slivers where rounding dominates the rate
+_HIST_OT_RATE_TOL = 0.02        # 2% band around 1.5x counts as "at 1.5x" (discretionary)
+_HIST_LIFT_THRESHOLD = 1.5 * (1 + _HIST_OT_RATE_TOL)   # => 1.53x
+
+# Lookback / Realtime bonuses are system defaults always excluded from the
+# discretionary question, so we never classify them.
+_HIST_BONUS_EXCLUDE_RE = re.compile(
+    r"look\s*_?\s*back|lookback|real\s*_?\s*time|realtime|(^|[_\-\s])(lb|rt)([_\-\s]|$)",
+    re.IGNORECASE,
+)
+
+
+def _hist_norm(s):
+    """Normalize a name for cross-file matching: keep a-z0-9 only, lowercase.
+    'Referral Bonus' and 'Referral_Bonus(DR1)' both collapse to 'referralbonus'."""
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def _hist_money(v):
+    """Parse a wide-format money/hours cell ('$1,382.88', '13.6', '') to float."""
+    s = str(v).replace("$", "").replace(",", "").strip()
+    if s in ("", "-", "nan", "none", "nat"):
+        return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _parse_wide_col(col):
+    """Parse a wide column like 'Referral_Bonus(DR1)' / 'Regular_Hours(DR1)'
+    (pandas appends '.1' to duplicate headers). Returns (value_base, is_hours),
+    or None if it isn't a '<name>(DRk)' column."""
+    c = re.sub(r"\.\d+$", "", str(col))            # strip pandas dupe suffix
+    m = re.match(r"^(.*)\((DR\d+)\)$", c)
+    if not m:
+        return None
+    base = m.group(1)
+    if base.endswith("_Hours"):
+        return (base[:-6], True)
+    return (base, False)
+
+
+def _wide_value_hours_maps(df):
+    """Group wide columns by their normalized earning base. Returns
+    {norm_base: {'value': [cols], 'hours': [cols], 'display': raw_base}}."""
+    groups = {}
+    for col in df.columns:
+        parsed = _parse_wide_col(col)
+        if not parsed:
+            continue
+        raw_base, is_hours = parsed
+        g = groups.setdefault(_hist_norm(raw_base),
+                              {"value": [], "hours": [], "display": raw_base})
+        g["hours" if is_hours else "value"].append(col)
+    return groups
+
+
+def classify_bonus_from_historic(wide_df) -> dict:
+    """Classify every real bonus in a WIDE historic prior-payroll report as
+    discretionary vs non-discretionary via the FLSA 1.5x OT-rate test.
+
+    Returns {norm_bonus_key: record}, keyed by _hist_norm(bonus name) so the caller
+    can match it to a long-file Type Description. Each record has verdict
+    ('non_discretionary'|'discretionary'|'indeterminate'), display, source
+    ('ot_rate_test'|'amazon_label'), reason, periods_tested, lifted_periods,
+    employees, example.
+    """
+    if wide_df is None or getattr(wide_df, "empty", True):
+        return {}
+    groups = _wide_value_hours_maps(wide_df)
+    idx = wide_df.index
+
+    def _sum_cols(cols):
+        if not cols:
+            return pd.Series(0.0, index=idx)
+        total = pd.Series(0.0, index=idx)
+        for c in cols:
+            total = total + wide_df[c].map(_hist_money)
+        return total
+
+    # Overtime buckets: base mentions 'overtime' but not 'retro'.
+    ot_val = pd.Series(0.0, index=idx)
+    ot_hrs = pd.Series(0.0, index=idx)
+    for key, g in groups.items():
+        if "overtime" in key and "retro" not in key:
+            ot_val = ot_val + _sum_cols(g["value"])
+            ot_hrs = ot_hrs + _sum_cols(g["hours"])
+
+    # Regular buckets: 'regular' + 'deptrateregular' only.
+    reg_val = pd.Series(0.0, index=idx)
+    reg_hrs = pd.Series(0.0, index=idx)
+    for key in ("regular", "deptrateregular"):
+        g = groups.get(key)
+        if g:
+            reg_val = reg_val + _sum_cols(g["value"])
+            reg_hrs = reg_hrs + _sum_cols(g["hours"])
+
+    emp_col = next((c for c in wide_df.columns
+                    if _hist_norm(c) in ("employeecode", "eecode", "employeeid")), None)
+    pay_col = next((c for c in wide_df.columns
+                    if _hist_norm(c) in ("paydate", "checkdate")), None)
+    emp_series = (wide_df[emp_col].astype(str) if emp_col
+                  else pd.Series([str(i) for i in idx], index=idx))
+    pay_series = wide_df[pay_col].astype(str) if pay_col else pd.Series("", index=idx)
+
+    base = pd.DataFrame({
+        "emp": emp_series, "pay": pay_series,
+        "ot_val": ot_val, "ot_hrs": ot_hrs, "reg_val": reg_val, "reg_hrs": reg_hrs,
+    })
+    base["testable"] = ((base["ot_hrs"] >= _HIST_MIN_OT_HOURS)
+                        & (base["reg_hrs"] > 0) & (base["reg_val"] > 0))
+    base["base_rate"] = 0.0
+    base.loc[base["reg_hrs"] > 0, "base_rate"] = base["reg_val"] / base["reg_hrs"]
+    base["ot_rate"] = 0.0
+    base.loc[base["ot_hrs"] > 0, "ot_rate"] = base["ot_val"] / base["ot_hrs"]
+    base["ratio"] = 0.0
+    base.loc[base["base_rate"] > 0, "ratio"] = base["ot_rate"] / base["base_rate"]
+
+    verdicts = {}
+    for key, g in groups.items():
+        if "bonus" not in key:
+            continue
+        if _HIST_BONUS_EXCLUDE_RE.search(g["display"]):
+            continue
+        display = g["display"].replace("_", " ").strip()
+
+        # Amazon pre-labels some bonuses in the column name — authoritative.
+        if "nondiscretionary" in key:
+            verdicts[key] = {"verdict": "non_discretionary", "display": display,
+                             "source": "amazon_label",
+                             "reason": "Column name is labelled 'Non-Discretionary' by Amazon.",
+                             "periods_tested": 0, "lifted_periods": 0, "employees": 0,
+                             "example": None}
+            continue
+        if "discretionary" in key:
+            verdicts[key] = {"verdict": "discretionary", "display": display,
+                             "source": "amazon_label",
+                             "reason": "Column name is labelled 'Discretionary' by Amazon.",
+                             "periods_tested": 0, "lifted_periods": 0, "employees": 0,
+                             "example": None}
+            continue
+
+        present = _sum_cols(g["value"]) > 0
+        pts = base[base["testable"] & present]
+        if pts.empty:
+            verdicts[key] = {"verdict": "indeterminate", "display": display,
+                             "source": "ot_rate_test",
+                             "reason": ("No historic pay period had this bonus together with "
+                                        f"overtime >= {_HIST_MIN_OT_HOURS:g}h, so the 1.5x rate "
+                                        "test couldn't run."),
+                             "periods_tested": 0, "lifted_periods": 0, "employees": 0,
+                             "example": None}
+            continue
+
+        lifted = pts[pts["ratio"] > _HIST_LIFT_THRESHOLD]
+        p_with = len(lifted) / len(pts)
+        absent_pts = base[base["testable"] & ~present]
+        p_without = (float((absent_pts["ratio"] > _HIST_LIFT_THRESHOLD).mean())
+                     if len(absent_pts) else 0.0)
+        non_disc = (p_with >= 0.5) and (p_with - p_without >= 0.15)
+        verdict = "non_discretionary" if non_disc else "discretionary"
+        ex_row = (lifted.iloc[0] if (verdict == "non_discretionary" and not lifted.empty)
+                  else pts.iloc[0])
+        example = {"employee": str(ex_row["emp"]), "paydate": str(ex_row["pay"]),
+                   "base_rate": round(float(ex_row["base_rate"]), 2),
+                   "ot_rate": round(float(ex_row["ot_rate"]), 2),
+                   "ratio": round(float(ex_row["ratio"]), 3)}
+        if verdict == "non_discretionary":
+            reason = (f"In {len(lifted)} of {len(pts)} historic OT periods with this bonus the "
+                      f"weighted-OT rate exceeded 1.5x the blended regular rate "
+                      f"(vs {p_without*100:.0f}% of non-bonus OT periods) — the bonus is rolled "
+                      f"into the regular rate.")
+        else:
+            reason = (f"In {len(lifted)} of {len(pts)} historic OT periods with this bonus the "
+                      f"weighted-OT rate held at ~1.5x the blended regular rate — the bonus did "
+                      f"not lift the OT rate.")
+        verdicts[key] = {"verdict": verdict, "display": display, "source": "ot_rate_test",
+                         "reason": reason, "periods_tested": int(len(pts)),
+                         "lifted_periods": int(len(lifted)),
+                         "employees": int(pts["emp"].nunique()), "example": example}
+    return verdicts
+
+
+def _read_wide_historic_bytes(content: bytes, filename: str) -> pd.DataFrame:
+    """Read a WIDE historic prior-payroll report (bot output) as all-strings so
+    '$1,382.88'-style money cells and leading-zero employee codes survive."""
+    name = (filename or "").lower()
+    if name.endswith(".csv"):
+        return pd.read_csv(io.BytesIO(content), dtype=str).fillna("")
+    return pd.read_excel(io.BytesIO(content), dtype=str).fillna("")
+
+
 def build_simplified_xlsx_bytes(results: dict) -> bytes:
     """Three-tab simplified xlsx, mirrors the ADP setup_helper output."""
     buf = io.BytesIO()
@@ -474,11 +695,19 @@ def run_paycom_prior_payroll_setup_helper(
     prior_payroll_filename: str,
     scheduled_deductions_content: bytes,
     scheduled_deductions_filename: str,
+    historic_reports: list | None = None,
 ):
     """Returns (results_dict, xlsx_bytes).
 
     results_dict has keys: Earnings_Codes, Contributions, Deductions,
-    Taxes_Discovered, Pre_Post_Tax, Bonus.
+    Taxes_Discovered, Pre_Post_Tax, Bonus, Bonus_Historic.
+
+    ``historic_reports`` (optional) is a list of (content_bytes, filename) tuples
+    for the historic WIDE per-period reports (PriorPayroll_YYYY.csv). When given,
+    each real bonus is auto-classified discretionary vs non-discretionary via the
+    FLSA 1.5x overtime-rate test (needs the hours those wide reports carry, which
+    the long-format register lacks). Results land in results["Bonus_Historic"]
+    keyed by normalized bonus name.
     """
     prior_df = _read_either(prior_payroll_content, prior_payroll_filename)
     sched_df = _read_either(scheduled_deductions_content, scheduled_deductions_filename)
@@ -489,6 +718,17 @@ def run_paycom_prior_payroll_setup_helper(
     pre_post = classify_pre_post_tax(sched_df)
     bonus = classify_bonus(prior_df)
 
+    # Optional historic WIDE reports -> per-bonus discretionary verdict.
+    bonus_hist = {}
+    if historic_reports:
+        frames = []
+        for item in historic_reports:
+            content, fname = item[0], (item[1] if len(item) > 1 else "historic.csv")
+            frames.append(_read_wide_historic_bytes(content, fname))
+        if frames:
+            hist_df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+            bonus_hist = classify_bonus_from_historic(hist_df)
+
     summary = [
         {"Metric": "Prior Payroll Register rows", "Value": int(len(prior_df))},
         {"Metric": "Scheduled Deductions rows", "Value": int(len(sched_df))},
@@ -498,6 +738,9 @@ def run_paycom_prior_payroll_setup_helper(
         {"Metric": "Distinct tax codes", "Value": len(taxes)},
         {"Metric": "Bonus verdict", "Value": bonus["verdict"]},
     ]
+    if bonus_hist:
+        summary.append({"Metric": "Bonuses auto-classified from historic reports",
+                        "Value": len(bonus_hist)})
 
     results = {
         "Summary": summary,
@@ -507,6 +750,7 @@ def run_paycom_prior_payroll_setup_helper(
         "Taxes_Discovered": taxes,
         "Pre_Post_Tax": pre_post,
         "Bonus": bonus,
+        "Bonus_Historic": bonus_hist,
     }
     xlsx_bytes = build_simplified_xlsx_bytes(results)
     return results, xlsx_bytes

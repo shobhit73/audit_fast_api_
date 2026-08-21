@@ -1161,7 +1161,13 @@ async def handle_list_tools() -> list[types.Tool]:
                 "means Paycom rolled a bonus into the regular rate => non-discretionary. When "
                 "the differential test cannot run (only WOT, only OT, or no bonus codes), the "
                 "verdict is 'indeterminate' with a note to supply a Payroll Register Detail "
-                "with hours."
+                "with hours.\n\n"
+                "[OPTIONAL: historic_report_paths] Supply the historic bot's WIDE per-period "
+                "reports (PriorPayroll_YYYY.csv - one row per employee per pay period, with "
+                "paired '<Earning>_Hours' columns). When given, EACH real bonus is auto-classified "
+                "discretionary vs non-discretionary directly from the FLSA 1.5x overtime-rate test "
+                "(weighted-OT rate vs blended regular rate) - no paystub needed. The per-bonus "
+                "verdicts are returned under 'bonus_historic' in the answer."
             ),
             inputSchema={
                 "type": "object",
@@ -1170,6 +1176,8 @@ async def handle_list_tools() -> list[types.Tool]:
                     "prior_payroll_base64": {"type": "string", "description": "Fallback: base64 Paycom Prior Payroll Register"},
                     "scheduled_deductions_path": {"type": "string", "description": PATH_DESC + " (Paycom Scheduled Deductions Report)"},
                     "scheduled_deductions_base64": {"type": "string", "description": "Fallback: base64 Paycom Scheduled Deductions Report"},
+                    "historic_report_paths": {"type": "array", "items": {"type": "string"}, "description": "OPTIONAL. Local paths to the historic WIDE per-period reports (PriorPayroll_YYYY.csv) for automatic bonus discretionary classification."},
+                    "historic_reports_base64": {"type": "array", "items": {"type": "string"}, "description": "Fallback: base64 list of the historic WIDE per-period reports."},
                 },
             },
         ),
@@ -2118,8 +2126,13 @@ async def handle_call_tool(name: str, arguments: dict | None):
             sched_name = os.path.basename(sched_name.strip().strip('"'))
             require_vendor(prior, prior_name, "paycom", "paycom_prior_payroll_setup_helper (prior payroll)")
             require_vendor(sched, sched_name, "paycom", "paycom_prior_payroll_setup_helper (scheduled deductions)")
+            # Optional historic WIDE per-period reports for automatic bonus classification.
+            historic_reports = []
+            if arguments.get("historic_report_paths") or arguments.get("historic_reports_base64"):
+                historic_reports = load_files_list(arguments, "historic_report_paths", "historic_reports_base64")
             results, xlsx_bytes = run_paycom_prior_payroll_setup_helper(
                 prior, prior_name, sched, sched_name,
+                historic_reports=historic_reports or None,
             )
             from datetime import datetime
             stamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -2152,6 +2165,18 @@ async def handle_call_tool(name: str, arguments: dict | None):
                     "bonus_reason": bonus["reason"],
                 },
             }
+            # Per-bonus discretionary verdicts from the historic reports (if supplied).
+            bonus_hist = results.get("Bonus_Historic") or {}
+            if bonus_hist:
+                payload["answers"]["bonus_historic"] = {
+                    rec["display"]: {"verdict": rec["verdict"], "source": rec["source"],
+                                     "reason": rec["reason"]}
+                    for rec in bonus_hist.values()
+                }
+                payload["message"] += (
+                    f" Auto-classified {len(bonus_hist)} bonus(es) from the historic report(s) "
+                    "(see answers.bonus_historic)."
+                )
             return [types.TextContent(type="text", text=json.dumps(payload, indent=2, default=_json_default))]
 
         elif name == "paycom_total_comparison":
