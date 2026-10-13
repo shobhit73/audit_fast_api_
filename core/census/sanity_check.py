@@ -203,7 +203,12 @@ def _validate_for_warnings(df_source, resolved_field_map):
                 problems.append("Employment Status (blank)")
             else:
                 sv_l = str(sv).strip().lower()
-                is_special = 'leave' in sv_l or 'inactive' in sv_l
+                # Retired / Deceased follow the Leave / Inactive rule: Uzio stores
+                # only Active or Terminated, and the onboarding API handles neither
+                # word properly ("Retired" -> TERMINATED with no termination date,
+                # "Deceased" -> no status at all).
+                is_special = ('leave' in sv_l or 'inactive' in sv_l
+                              or 'retir' in sv_l or 'deceas' in sv_l)
                 is_term = sv_l in ['t'] or any(s in sv_l for s in ['terminated'])
                 
                 if is_special and term_date_col and term_date_col in df_source.columns:
@@ -214,7 +219,9 @@ def _validate_for_warnings(df_source, resolved_field_map):
                     if _is_blank(row.get(term_date_col)):
                         problems.append("Terminated but missing Termination Date")
                 
-                is_standard = sv_l in ['a', 't', 'i'] or any(s in sv_l for s in ['active', 'terminated', 'inactive', 'leave'])
+                is_standard = sv_l in ['a', 't', 'i'] or any(
+                    s in sv_l for s in ['active', 'terminated', 'inactive', 'leave',
+                                        'retir', 'deceas'])
                 if not is_standard:
                     problems.append(f"Non-standard Status ({str(sv).strip()})")
 
@@ -380,7 +387,7 @@ def generate_corrected_census_xlsx(content, field_map_dict, fix_options=None,
         c_term = resolved_field_map.get('Termination Date')
         if c_pos and c_term and c_pos in df_download.columns and c_term in df_download.columns:
             pos_lower = df_download[c_pos].astype(str).str.strip().str.lower()
-            mask_special = pos_lower.str.contains('leave|inactive', na=False)
+            mask_special = pos_lower.str.contains('leave|inactive|retir|deceas', na=False)
             mask_term_blank = _is_blank_series(c_term)
             
             # Case A: Special Status & No Term Date -> Active (Exclude from Payroll)
