@@ -461,7 +461,10 @@ def generate_uzio_template(df_source, vendor_field_map, fix_options=None):
 
                     if fix_options and fix_options.get('fix_status', False):
                         if 'not hired' in s: return 'EXCLUDE'
-                        if 'leave' in s or 'inactive' in s:
+                        # Uzio stores only Active or Terminated. Sent as "Retired" the
+                        # onboarding API records Terminated with no termination date;
+                        # "Deceased" maps to no status at all.
+                        if 'leave' in s or 'inactive' in s or 'retir' in s or 'deceas' in s:
                             term_col = vendor_field_map.get('Termination Date')
                             if term_col and pd.notna(row.get(term_col)) and str(row.get(term_col)).strip() != "":
                                 return 'TERMINATED'
@@ -905,7 +908,8 @@ def selective_update_uzio(df_source, df_template, selected_uzio_cols, vendor_fie
                     s = str(val).lower()
                     if fix_options.get('fix_status', False):
                         if 'not hired' in s: formatted_val = 'EXCLUDE'
-                        elif 'inactive' in s or 'leave' in s:
+                        elif ('inactive' in s or 'leave' in s
+                              or 'retir' in s or 'deceas' in s):
                             term_col = vendor_field_map.get('Termination Date')
                             t_val = str(source_row_data.get(term_col, "")).strip() if term_col else ""
                             if t_val and t_val.lower() != "nan":
